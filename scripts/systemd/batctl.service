@@ -1,0 +1,16 @@
+[UNIT]
+Description=Run batctl - a tool to define a custom charging plan for PV batteries
+
+[Service]
+Type=oneshot
+WorkingDirectory=/path/to/batctl
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/path/to/batctl/.venv/bin/python3 --u /path/to/batctl/batctl.py --host fronius-wr.home --config /path/to/batctl/charge_rules.conf
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=batctl
+SyslogFacility=daemon
+SyslogLevel=info
+# optional: run as specific user/group (uncomment and set)
+# User=nobody
+# Group=nobody

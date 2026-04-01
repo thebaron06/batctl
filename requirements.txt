@@ -1,0 +1,2 @@
+pysunspec2
+pyserial

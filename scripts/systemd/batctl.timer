@@ -1,0 +1,12 @@
+[Unit]
+Description=Timer to run batctl.service every X minutes
+
+[Timer]
+# Run at minutes 5,10,15,... ie. every 5 minutes aligend to the clock
+OnCalendar=*-*-* *:0/5:00
+# If system was off or timer missed, run immediately on boot
+Persistent=true
+Unit=batctl.service
+
+[Install]
+WantedBy=timer.target
