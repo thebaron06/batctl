@@ -2,8 +2,7 @@
 
 set -euo pipefail
 
-HOST="fronius-wr.home"
-CONFIG="charge_rules.conf"
+CONFIG="batctl.conf"
 
 SCRIPT_DIR="$(dirname "$0")"
 
@@ -12,4 +11,4 @@ cd "$SCRIPT_DIR"        # go to script-path
 # . ./venv/bin/activate
 
 export PYTHONUNBUFFERED=1
-${SCRIPT_DIR}/.venv/bin/python3 batctl.py --host "${HOST}" --config "${CONFIG}" 2>&1 | /usr/bin/logger -t batctl -p user.info
+${SCRIPT_DIR}/../../.venv/bin/python3 batctl.py run --config "${CONFIG}" 2>&1 | /usr/bin/logger -t batctl -p user.info
