@@ -77,6 +77,7 @@ _CONFIG_DEFAULTS: dict[str, dict[str, str]] = {
         "end_of_day_full_charge": "false",
         "night_grid_export": "false",
         "weather_aware": "false",
+        "charge_windows": "false",
     },
     "charging": {
         "upper_soc_limit": "80",
@@ -127,11 +128,14 @@ class Config:
     feat_end_of_day_full_charge: bool = False
     feat_night_grid_export: bool = False
     feat_weather_aware: bool = False
+    feat_charge_windows: bool = False
     # [charging]
     upper_soc_limit: float = 80.0
     min_charge_rate_w: float = 300.0
     # [charge_taper]: sorted descending by threshold
     charge_taper: list = field(default_factory=list)
+    # [charge_windows]: list of (start, end) time tuples; empty = no restriction
+    charge_windows: list = field(default_factory=list)
     # [end_of_day]
     lead_time_minutes: int = 120
     # [grid_export]
@@ -164,6 +168,7 @@ def _make_parser() -> configparser.ConfigParser:
         for k, v in kvs.items():
             cp.set(section, k, v)
     cp.add_section("charge_taper")
+    cp.add_section("charge_windows")
     return cp
 
 
@@ -197,6 +202,16 @@ def load_config(path: str, overrides: Optional[dict] = None) -> Config:
         taper.append((threshold, scale))
     taper.sort(key=lambda t: t[0], reverse=True)
 
+    windows: list[tuple[datetime.time, datetime.time]] = []
+    for name, val in cp.items("charge_windows"):
+        try:
+            start_s, end_s = val.strip().split("-", 1)
+            start = datetime.time.fromisoformat(start_s.strip())
+            end = datetime.time.fromisoformat(end_s.strip())
+            windows.append((start, end))
+        except (ValueError, AttributeError):
+            log.warning("Skipping invalid charge_windows entry: %s = %s", name, val)
+
     lat_s = cp.get("location", "latitude")
     lon_s = cp.get("location", "longitude")
 
@@ -208,9 +223,11 @@ def load_config(path: str, overrides: Optional[dict] = None) -> Config:
         feat_end_of_day_full_charge=cp.getboolean("features", "end_of_day_full_charge"),
         feat_night_grid_export=cp.getboolean("features", "night_grid_export"),
         feat_weather_aware=cp.getboolean("features", "weather_aware"),
+        feat_charge_windows=cp.getboolean("features", "charge_windows"),
         upper_soc_limit=cp.getfloat("charging", "upper_soc_limit"),
         min_charge_rate_w=cp.getfloat("charging", "min_charge_rate_w"),
         charge_taper=taper,
+        charge_windows=windows,
         lead_time_minutes=cp.getint("end_of_day", "lead_time_minutes"),
         reserve_soc=cp.getfloat("grid_export", "reserve_soc"),
         min_discharge_rate_w=cp.getfloat("grid_export", "min_discharge_rate_w"),
@@ -338,6 +355,16 @@ def validate_features(cfg: Config) -> None:
                 "[features] weather_aware requires [weather] performance_ratio in (0, 1]"
             )
 
+    if cfg.feat_charge_windows:
+        if not cfg.timezone:
+            raise ValueError(
+                "[features] charge_windows requires [location] timezone to be set"
+            )
+        if not cfg.charge_windows:
+            raise ValueError(
+                "[features] charge_windows = true but no windows defined in [charge_windows]"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Sun times
@@ -383,6 +410,35 @@ def determine_phase(
     if now < sunset:
         return PHASE_END_OF_DAY
     return PHASE_NIGHT
+
+
+# ---------------------------------------------------------------------------
+# Charge-window check (pure logic, testable without I/O)
+# ---------------------------------------------------------------------------
+
+def is_in_charging_window(
+    now_time: datetime.time,
+    windows: list[tuple[datetime.time, datetime.time]],
+) -> bool:
+    """Return True if now_time falls within any of the configured charging windows.
+
+    An empty window list means no restriction (always returns True).
+
+    Windows where start < end cover a simple intra-day range (e.g. 10:00–15:00).
+    Windows where start > end wrap midnight (e.g. 22:00–06:00).
+    The end time is exclusive (half-open interval [start, end)).
+    """
+    if not windows:
+        return True
+    for start, end in windows:
+        if start <= end:
+            if start <= now_time < end:
+                return True
+        else:
+            # Midnight-crossing window: active from start until end next day
+            if now_time >= start or now_time < end:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -776,11 +832,12 @@ def cmd_run(args) -> None:
         sys.exit(1)
 
     log.info(
-        "Features: charge_limit=%s  end_of_day=%s  night_export=%s  weather=%s",
+        "Features: charge_limit=%s  end_of_day=%s  night_export=%s  weather=%s  charge_windows=%s",
         cfg.feat_charge_limit,
         cfg.feat_end_of_day_full_charge,
         cfg.feat_night_grid_export,
         cfg.feat_weather_aware,
+        cfg.feat_charge_windows,
     )
 
     # --- connect and read model 124 -----------------------------------------
@@ -823,35 +880,35 @@ def cmd_run(args) -> None:
     now: datetime.datetime
     phase: str
 
-    if (
+    needs_time = (
         cfg.feat_end_of_day_full_charge
         or cfg.feat_night_grid_export
         or cfg.feat_charge_limit
-    ):
-        tz = ZoneInfo(cfg.timezone) if cfg.timezone else None
+        or cfg.feat_charge_windows
+    )
 
-        if tz and cfg.latitude is not None and cfg.longitude is not None:
-            now = datetime.datetime.now(tz=tz)
-            today = now.date()
-            today_sun = get_sun_times(cfg.latitude, cfg.longitude, cfg.timezone, today)
-            sunrise = today_sun["sunrise"]
-            sunset = today_sun["sunset"]
-            phase = determine_phase(now, sunrise, sunset, cfg.lead_time_minutes)
-            log.info(
-                "Phase: %s  now=%s  sunrise=%s  sunset=%s",
-                phase,
-                now.strftime("%H:%M"),
-                sunrise.strftime("%H:%M"),
-                sunset.strftime("%H:%M"),
-            )
-        else:
-            # No location configured — only day-time features can work
-            now = datetime.datetime.now()
-            today = now.date()
-            phase = PHASE_DAY
+    if needs_time and cfg.timezone:
+        tz = ZoneInfo(cfg.timezone)
+        now = datetime.datetime.now(tz=tz)
     else:
+        tz = None
         now = datetime.datetime.now()
-        today = now.date()
+
+    today = now.date()
+
+    if tz and cfg.latitude is not None and cfg.longitude is not None:
+        today_sun = get_sun_times(cfg.latitude, cfg.longitude, cfg.timezone, today)
+        sunrise = today_sun["sunrise"]
+        sunset = today_sun["sunset"]
+        phase = determine_phase(now, sunrise, sunset, cfg.lead_time_minutes)
+        log.info(
+            "Phase: %s  now=%s  sunrise=%s  sunset=%s",
+            phase,
+            now.strftime("%H:%M"),
+            sunrise.strftime("%H:%M"),
+            sunset.strftime("%H:%M"),
+        )
+    else:
         phase = PHASE_DAY
 
     # --- apply control logic per phase --------------------------------------
@@ -866,11 +923,31 @@ def cmd_run(args) -> None:
         return
 
     # DAY (or night/end_of_day with features disabled) → apply charge limiting
-    _apply_charge_control(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw)
+    _apply_charge_control(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now)
 
 
-def _apply_charge_control(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw):
-    """Apply taper + optional upper-limit charge control."""
+def _apply_charge_control(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now):
+    """Apply taper + optional upper-limit charge control, respecting time windows."""
+    # --- charge_windows: throttle to min rate outside allowed windows ---------
+    if cfg.feat_charge_windows and cfg.charge_windows:
+        tz = ZoneInfo(cfg.timezone) if cfg.timezone else None
+        now_local = now.astimezone(tz) if (tz and now.tzinfo) else now
+        now_time = now_local.time()
+        if not is_in_charging_window(now_time, cfg.charge_windows):
+            min_raw = (
+                int(cfg.min_charge_rate_w / wchamax * 100.0 * (10 ** abs(sf)))
+                if wchamax > 0
+                else 0
+            )
+            min_raw = min(min_raw, int(100 * (10 ** abs(sf))))
+            log.info(
+                "SoC %.2f%% — outside charging window at %s → "
+                "min rate (raw %d, StorCtl_Mod=1)",
+                soc, now_time.strftime("%H:%M"), min_raw,
+            )
+            write_storage_model(storage, min_raw, None, 1, args.dry_run)
+            return
+
     if not cfg.feat_charge_limit and not cfg.charge_taper:
         log.info("No charge_limit feature and no taper rules — nothing to do")
         return

@@ -28,6 +28,16 @@ The sunrise reserve is intended to cover morning consumption (e.g. breakfast) un
 
 > **Important:** whether the discharged energy actually flows to the grid or only covers house loads depends on your inverter's feed-in configuration, not on batctl. Verify with your smart meter after the first night run.
 
+### Time-window charging (`charge_windows`)
+
+Restricts charging to one or more configurable time windows during the day. Outside any defined window, charging is throttled to `min_charge_rate_w` — set that to `0` to block charging completely.
+
+Typical use: allow full charging only around solar noon (e.g. 10:00–15:00) so the battery fills when PV production peaks, avoiding charging from the grid in the early morning or late afternoon.
+
+Multiple windows can be defined; if the current time falls inside *any* window, normal charging logic applies. Windows may cross midnight (e.g. `22:00-06:00`).
+
+The feature is independent of `charge_limit` but compatible with it: within a window, taper and upper-limit rules still apply; outside a window, the min rate applies regardless of SoC. Requires `[location] timezone` for local time.
+
 ### Weather-aware export (`weather_aware`)
 
 If tomorrow's solar production forecast is below a configurable threshold, the night export is skipped and the battery is kept for next-day home use. Uses [Open-Meteo](https://open-meteo.com) (free, no API key needed). If the forecast fetch fails, batctl falls back to exporting (fail-open).
@@ -140,6 +150,7 @@ Key settings:
 | `features` | `end_of_day_full_charge` | `false` | Lift cap near sunset |
 | `features` | `night_grid_export` | `false` | Discharge to grid overnight |
 | `features` | `weather_aware` | `false` | Skip export on cloudy forecast |
+| `features` | `charge_windows` | `false` | Restrict charging to time windows |
 | `charging` | `upper_soc_limit` | `80` | Day-time SoC cap (%) |
 | `grid_export` | `reserve_soc` | `12` | Minimum SoC at sunrise (%) |
 | `end_of_day` | `lead_time_minutes` | `120` | Minutes before sunset to lift cap |
@@ -154,6 +165,7 @@ Key settings:
 end_of_day_full_charge  →  charge_limit AND [location]
 night_grid_export       →  [location] AND [battery] capacity_kwh > 0
 weather_aware           →  night_grid_export AND [weather] pv_peak_kwp > 0
+charge_windows          →  [location] timezone AND at least one entry in [charge_windows]
 ```
 
 A misconfigured combination exits immediately with a clear error message.

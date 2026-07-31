@@ -4,31 +4,6 @@ Collected during initial implementation — not scheduled, not prioritised.
 
 ---
 
-## Time-based charging schedule
-
-Allow charging to be blocked or severely limited during configurable time windows,
-independent of SoC thresholds. Use cases:
-
-- Block charging in late afternoon to preserve export capacity for the end-of-day
-  full charge.
-- Shift the bulk of daily charging toward the midday peak (when PV production
-  typically peaks) by disabling or limiting charging in the early morning and
-  late afternoon.
-
-Config sketch:
-```ini
-[charge_windows]
-# Allow full charging only between 10:00 and 15:00 local time.
-# Outside this window, limit to min_charge_rate_w.
-# Format:  name = HH:MM-HH:MM
-midday = 10:00-15:00
-```
-
-Compatibility: would require `[location]` for local time; could be a standalone
-feature or combined with `charge_limit`.
-
----
-
 ## Smart-meter integration
 
 Read the smart meter (SunSpec model 20x, exposed by the Fronius inverter on a

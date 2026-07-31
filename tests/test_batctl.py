@@ -24,6 +24,7 @@ from batctl import (
     compute_discharge_setpoint,
     determine_phase,
     estimate_tomorrow_kwh,
+    is_in_charging_window,
     load_config,
     update_config_file,
     validate_features,
@@ -465,3 +466,104 @@ class TestWeatherCacheValid:
         today = datetime.date.today()
         assert not _is_weather_cache_valid({}, self._cfg(), today)
         assert not _is_weather_cache_valid({"latitude": "bad"}, self._cfg(), today)
+
+
+# ---------------------------------------------------------------------------
+# validate_features — charge_windows additions
+# ---------------------------------------------------------------------------
+
+class TestValidateFeaturesChargeWindows:
+    def test_charge_windows_requires_timezone(self):
+        cfg = Config(
+            feat_charge_windows=True,
+            timezone="",
+            charge_windows=[(datetime.time(10, 0), datetime.time(15, 0))],
+        )
+        with pytest.raises(ValueError, match="timezone"):
+            validate_features(cfg)
+
+    def test_charge_windows_requires_windows_defined(self):
+        cfg = Config(
+            feat_charge_windows=True,
+            timezone="Europe/Vienna",
+            charge_windows=[],
+        )
+        with pytest.raises(ValueError, match="no windows defined"):
+            validate_features(cfg)
+
+    def test_charge_windows_ok(self):
+        cfg = Config(
+            feat_charge_windows=True,
+            timezone="Europe/Vienna",
+            charge_windows=[(datetime.time(10, 0), datetime.time(15, 0))],
+        )
+        validate_features(cfg)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# is_in_charging_window
+# ---------------------------------------------------------------------------
+
+class TestIsInChargingWindow:
+    def _t(self, h: int, m: int = 0) -> datetime.time:
+        return datetime.time(h, m)
+
+    def test_empty_windows_always_true(self):
+        assert is_in_charging_window(self._t(3), [])
+        assert is_in_charging_window(self._t(14), [])
+
+    def test_inside_single_window(self):
+        windows = [(self._t(10), self._t(15))]
+        assert is_in_charging_window(self._t(10, 0), windows)   # at start (inclusive)
+        assert is_in_charging_window(self._t(12, 30), windows)  # mid window
+        assert is_in_charging_window(self._t(14, 59), windows)  # just before end
+
+    def test_outside_single_window(self):
+        windows = [(self._t(10), self._t(15))]
+        assert not is_in_charging_window(self._t(9, 59), windows)   # just before start
+        assert not is_in_charging_window(self._t(15, 0), windows)   # at end (exclusive)
+        assert not is_in_charging_window(self._t(20, 0), windows)   # well outside
+
+    def test_multiple_windows_any_match(self):
+        windows = [(self._t(6), self._t(8)), (self._t(11), self._t(14))]
+        assert is_in_charging_window(self._t(7), windows)    # in first window
+        assert is_in_charging_window(self._t(12), windows)   # in second window
+        assert not is_in_charging_window(self._t(9), windows)  # between windows
+
+    def test_midnight_crossing_window_before_midnight(self):
+        # 22:00–06:00: active from 22:00 to 23:59
+        windows = [(self._t(22), self._t(6))]
+        assert is_in_charging_window(self._t(22, 0), windows)
+        assert is_in_charging_window(self._t(23, 59), windows)
+
+    def test_midnight_crossing_window_after_midnight(self):
+        # 22:00–06:00: active from 00:00 to 05:59
+        windows = [(self._t(22), self._t(6))]
+        assert is_in_charging_window(self._t(0, 0), windows)
+        assert is_in_charging_window(self._t(5, 59), windows)
+
+    def test_midnight_crossing_window_outside(self):
+        windows = [(self._t(22), self._t(6))]
+        assert not is_in_charging_window(self._t(6, 0), windows)   # at end (exclusive)
+        assert not is_in_charging_window(self._t(12, 0), windows)  # midday, outside
+
+    def test_load_config_parses_windows(self, tmp_path):
+        conf = tmp_path / "batctl.conf"
+        conf.write_text(
+            "[features]\ncharge_windows = true\n"
+            "[location]\ntimezone = Europe/Vienna\n"
+            "[charge_windows]\nmidday = 10:00-15:00\nmorning = 06:30-09:00\n"
+        )
+        cfg = load_config(str(conf))
+        assert cfg.feat_charge_windows is True
+        assert len(cfg.charge_windows) == 2
+        assert datetime.time(10, 0) in [w[0] for w in cfg.charge_windows]
+        assert datetime.time(15, 0) in [w[1] for w in cfg.charge_windows]
+
+    def test_load_config_skips_invalid_window(self, tmp_path):
+        conf = tmp_path / "batctl.conf"
+        conf.write_text(
+            "[charge_windows]\ngood = 10:00-15:00\nbad = not-a-time\n"
+        )
+        cfg = load_config(str(conf))
+        assert len(cfg.charge_windows) == 1

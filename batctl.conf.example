@@ -31,6 +31,7 @@ charge_limit           = false   # cap charging at [charging] upper_soc_limit
 end_of_day_full_charge = false   # lift cap near sunset so battery reaches 100%
 night_grid_export      = false   # discharge to grid overnight (sunset→sunrise)
 weather_aware          = false   # skip export when tomorrow's forecast is poor
+charge_windows         = false   # restrict charging to configured time windows
 
 # ---------------------------------------------------------------------------
 [charging]
@@ -104,6 +105,23 @@ refresh_hours         = 6      # re-fetch forecast if cache is older than this
 cache_path            = /tmp/batctl_weather_cache.json
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+[charge_windows]
+# Time windows during which charging is allowed at the configured taper/limit rate.
+# Outside these windows charging is throttled to [charging] min_charge_rate_w
+# (set that to 0 to fully block charging outside windows).
+#
+# Requires [features] charge_windows = true AND [location] timezone.
+# Format:  name = HH:MM-HH:MM  (local time, 24h; may cross midnight)
+# Multiple windows can be defined — if any window matches the current time,
+# normal charging logic applies.
+#
+# Examples:
+#   midday     = 10:00-15:00   # allow charging around solar noon
+#   overnight  = 22:00-06:00   # midnight-crossing window
+# ---------------------------------------------------------------------------
+# midday = 10:00-15:00
+
 [detected]
 # Written automatically by:  batctl detect --config batctl.conf
 # ---------------------------------------------------------------------------
