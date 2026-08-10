@@ -77,11 +77,13 @@ _CONFIG_DEFAULTS: dict[str, dict[str, str]] = {
         "end_of_day_full_charge": "false",
         "night_grid_export": "false",
         "weather_aware": "false",
+        "charge_windows": "false",
     },
     "charging": {
         "upper_soc_limit": "80",
         "min_charge_rate_w": "300",
         "avg_base_load_w": "200",
+        "profile": "none",
     },
     # [charge_taper] has no fixed defaults; user provides threshold = scale entries
     "end_of_day": {
@@ -90,6 +92,7 @@ _CONFIG_DEFAULTS: dict[str, dict[str, str]] = {
     "grid_export": {
         "reserve_soc": "12",
         "min_discharge_rate_w": "300",
+        "extend_hours": "0",
     },
     "battery": {
         "capacity_kwh": "0",
@@ -106,6 +109,10 @@ _CONFIG_DEFAULTS: dict[str, dict[str, str]] = {
         "skip_export_below_kwh": "10",
         "refresh_hours": "6",
         "cache_path": "/tmp/batctl_weather_cache.json",
+    },
+    "statefile": {
+        "enabled": "false",
+        "path": "/tmp/batctl_state.json",
     },
     "detected": {
         "manufacturer": "",
@@ -128,19 +135,25 @@ class Config:
     feat_end_of_day_full_charge: bool = False
     feat_night_grid_export: bool = False
     feat_weather_aware: bool = False
+    feat_charge_windows: bool = False
     # [charging]
     upper_soc_limit: float = 80.0
     min_charge_rate_w: float = 300.0
     avg_base_load_w: float = 200.0
+    charging_profile: str = "none"
     # [charge_taper]: sorted descending by threshold
     charge_taper: list = field(default_factory=list)
     # [eod_charge_taper]: sorted descending by threshold; used during end-of-day phase
     eod_charge_taper: list = field(default_factory=list)
+    # [charge_windows]: list of (start, end) time tuples
+    charge_windows: list = field(default_factory=list)
     # [end_of_day]
     lead_time_minutes: int = 120
     # [grid_export]
     reserve_soc: float = 12.0
     min_discharge_rate_w: float = 300.0
+    extend_hours: float = 0.0
+    extend_hours_auto: bool = False
     # [battery]
     capacity_kwh: float = 0.0
     wchamax_w: float = 0.0
@@ -154,6 +167,9 @@ class Config:
     skip_export_below_kwh: float = 10.0
     refresh_hours: float = 6.0
     cache_path: str = "/tmp/batctl_weather_cache.json"
+    # [statefile]
+    statefile_enabled: bool = False
+    statefile_path: str = "/tmp/batctl_state.json"
 
 
 # ---------------------------------------------------------------------------
@@ -169,10 +185,11 @@ def _make_parser() -> configparser.ConfigParser:
             cp.set(section, k, v)
     cp.add_section("charge_taper")
     cp.add_section("eod_charge_taper")
+    cp.add_section("charge_windows")
     return cp
 
 
-def load_config(path: str, overrides: Optional[dict] = None) -> Config:
+def load_config(path: str, overrides: Optional[dict] = None) -> "Config":
     """Load the INI config file and apply optional CLI overrides.
 
     overrides: mapping of 'section.key' -> string value, derived from CLI args
@@ -215,8 +232,30 @@ def load_config(path: str, overrides: Optional[dict] = None) -> Config:
         eod_taper.append((threshold, scale))
     eod_taper.sort(key=lambda t: t[0], reverse=True)
 
+    windows: list[tuple[datetime.time, datetime.time]] = []
+    for name, val in cp.items("charge_windows"):
+        try:
+            start_s, end_s = val.strip().split("-", 1)
+            start = datetime.time.fromisoformat(start_s.strip())
+            end = datetime.time.fromisoformat(end_s.strip())
+            windows.append((start, end))
+        except (ValueError, AttributeError):
+            log.warning("Skipping invalid charge_windows entry: %s = %s", name, val)
+
     lat_s = cp.get("location", "latitude")
     lon_s = cp.get("location", "longitude")
+
+    extend_hours_s = cp.get("grid_export", "extend_hours").strip().lower()
+    if extend_hours_s == "auto":
+        extend_hours_auto = True
+        extend_hours = 0.0
+    else:
+        extend_hours_auto = False
+        try:
+            extend_hours = float(extend_hours_s)
+        except ValueError:
+            log.warning("Invalid extend_hours value %r - using 0", extend_hours_s)
+            extend_hours = 0.0
 
     return Config(
         host=cp.get("connection", "host"),
@@ -226,14 +265,19 @@ def load_config(path: str, overrides: Optional[dict] = None) -> Config:
         feat_end_of_day_full_charge=cp.getboolean("features", "end_of_day_full_charge"),
         feat_night_grid_export=cp.getboolean("features", "night_grid_export"),
         feat_weather_aware=cp.getboolean("features", "weather_aware"),
+        feat_charge_windows=cp.getboolean("features", "charge_windows"),
         upper_soc_limit=cp.getfloat("charging", "upper_soc_limit"),
         min_charge_rate_w=cp.getfloat("charging", "min_charge_rate_w"),
         avg_base_load_w=cp.getfloat("charging", "avg_base_load_w"),
+        charging_profile=cp.get("charging", "profile").strip().lower(),
         charge_taper=taper,
         eod_charge_taper=eod_taper,
+        charge_windows=windows,
         lead_time_minutes=cp.getint("end_of_day", "lead_time_minutes"),
         reserve_soc=cp.getfloat("grid_export", "reserve_soc"),
         min_discharge_rate_w=cp.getfloat("grid_export", "min_discharge_rate_w"),
+        extend_hours=extend_hours,
+        extend_hours_auto=extend_hours_auto,
         capacity_kwh=cp.getfloat("battery", "capacity_kwh"),
         wchamax_w=cp.getfloat("battery", "wchamax_w"),
         latitude=float(lat_s) if lat_s else None,
@@ -244,6 +288,8 @@ def load_config(path: str, overrides: Optional[dict] = None) -> Config:
         skip_export_below_kwh=cp.getfloat("weather", "skip_export_below_kwh"),
         refresh_hours=cp.getfloat("weather", "refresh_hours"),
         cache_path=cp.get("weather", "cache_path"),
+        statefile_enabled=cp.getboolean("statefile", "enabled"),
+        statefile_path=cp.get("statefile", "path"),
     )
 
 
@@ -310,7 +356,7 @@ def update_config_file(path: str, updates: dict[str, dict[str, str]]) -> None:
 # Feature compatibility validation
 # ---------------------------------------------------------------------------
 
-def validate_features(cfg: Config) -> None:
+def validate_features(cfg: "Config") -> None:
     """Raise ValueError with a clear message when feature flags are misconfigured.
 
     Called early in 'run' so misconfigurations fail fast with actionable messages.
@@ -357,6 +403,23 @@ def validate_features(cfg: Config) -> None:
             raise ValueError(
                 "[features] weather_aware requires [weather] performance_ratio in (0, 1]"
             )
+
+    if cfg.feat_charge_windows:
+        if not cfg.timezone:
+            raise ValueError("[features] charge_windows requires [location] timezone to be set")
+        if not cfg.charge_windows:
+            raise ValueError("[features] charge_windows = true but no windows defined in [charge_windows]")
+
+    if cfg.charging_profile not in ("none", "solar_follow", "spread", "ramp_up"):
+        raise ValueError(
+            f"[charging] profile must be one of: none, solar_follow, spread, ramp_up "
+            f"(got {cfg.charging_profile!r})"
+        )
+    if cfg.charging_profile != "none":
+        if not cfg.timezone:
+            raise ValueError("[charging] profile requires [location] timezone to be set")
+        if cfg.pv_peak_kwp <= 0:
+            raise ValueError("[charging] profile requires [weather] pv_peak_kwp > 0")
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +469,25 @@ def determine_phase(
 
 
 # ---------------------------------------------------------------------------
+# Charging window helper
+# ---------------------------------------------------------------------------
+
+def is_in_charging_window(now_time: datetime.time, windows: list[tuple[datetime.time, datetime.time]]) -> bool:
+    """Return True if now_time falls within any of the configured charging windows.
+    Empty window list means no restriction. start > end wraps midnight (half-open [start, end))."""
+    if not windows:
+        return True
+    for start, end in windows:
+        if start <= end:
+            if start <= now_time < end:
+                return True
+        else:
+            if now_time >= start or now_time < end:
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Charge-rate decision (pure logic, testable without I/O)
 # ---------------------------------------------------------------------------
 
@@ -420,7 +502,7 @@ def compute_charge_setpoint(
 ) -> tuple[int, int]:
     """Compute (InWRte_raw, StorCtl_Mod) for a charging phase.
 
-    sf is the value read from InOutWRte_SF (typically -2, meaning raw = pct × 100).
+    sf is the value read from InOutWRte_SF (typically -2, meaning raw = pct * 100).
     Returns raw register values ready to write to the device.
     """
     sf_abs = abs(sf)
@@ -459,17 +541,25 @@ def compute_discharge_setpoint(
     min_discharge_w: float,
     avg_base_load_w: float,
     sf: int,
+    extend_hours: float = 0.0,
 ) -> Optional[int]:
     """Compute InWRte raw register value for the night export phase.
 
     Returns None when discharge should stop (SOC at/below reserve or no time left).
     Otherwise returns the raw register value to write to InWRte.
+
+    extend_hours: additional hours to add to the discharge horizon for rate calculation
+    (the hours_left guard still uses the real hours_left to stop at sunrise).
     """
     if soc <= reserve_soc or hours_left <= 0.0 or wchamax_w <= 0.0:
         return None
 
+    effective_hours = hours_left + extend_hours
+    if effective_hours <= 0.0:
+        return None
+
     energy_kwh = (soc - reserve_soc) / 100.0 * capacity_kwh
-    required_w = (energy_kwh * 1000.0 / hours_left)
+    required_w = (energy_kwh * 1000.0 / effective_hours)
     # account for houshold base load
     if avg_base_load_w > 0:
         required_w = required_w + avg_base_load_w
@@ -478,6 +568,184 @@ def compute_discharge_setpoint(
 
     # a negative setpoint for InWRte means discharge at set rate
     return int(round(-1 * (rate_pct * (10 ** abs(sf)))))
+
+
+# ---------------------------------------------------------------------------
+# Discharge horizon auto-extension
+# ---------------------------------------------------------------------------
+
+def compute_auto_extend_hours(
+    hourly_radiation: dict[int, float],
+    avg_base_load_w: float,
+    pv_peak_kwp: float,
+    performance_ratio: float,
+    sunrise_hour: int,
+    max_extend_h: float = 4.0,
+) -> float:
+    """Find how many hours after sunrise solar will cover avg_base_load_w.
+
+    hourly_radiation: {hour_int: W/m^2} for the target date
+    Returns the number of hours after sunrise_hour where PV output >= avg_base_load_w,
+    capped at max_extend_h.
+    """
+    for h in range(sunrise_hour, min(sunrise_hour + int(max_extend_h) + 2, 24)):
+        rad = hourly_radiation.get(h, 0.0)
+        estimated_w = rad * pv_peak_kwp * performance_ratio
+        if estimated_w >= avg_base_load_w:
+            return float(h - sunrise_hour)
+    return max_extend_h
+
+
+# ---------------------------------------------------------------------------
+# Charging profile plan generation
+# ---------------------------------------------------------------------------
+
+def generate_charging_plan(
+    hourly_radiation: dict[int, float],
+    profile: str,
+    pv_peak_kwp: float,
+    performance_ratio: float,
+    sunrise_hour: int,
+    sunset_hour: int,
+) -> dict[int, float]:
+    """Generate a charging plan for today's daylight hours based on the solar forecast.
+
+    Returns {hour_int: max_charge_rate_pct (0-100)} for each hour from sunrise to sunset.
+
+    Profiles:
+      solar_follow: rate proportional to hourly radiation vs. peak radiation.
+      spread:       uniform 100% across all daylight hours (time window, no rate ceiling).
+      ramp_up:      proportional to radiation up to peak hour, then 100% after peak.
+    """
+    daylight = list(range(sunrise_hour, sunset_hour + 1))
+    if not daylight:
+        return {}
+
+    if profile == "spread":
+        return {h: 100.0 for h in daylight}
+
+    # For solar_follow and ramp_up: use radiation to set ceilings
+    peak_rad = max((hourly_radiation.get(h, 0.0) for h in daylight), default=0.0)
+    if peak_rad <= 0:
+        # No forecast data: allow full charging
+        return {h: 100.0 for h in daylight}
+
+    if profile == "solar_follow":
+        return {
+            h: round(hourly_radiation.get(h, 0.0) / peak_rad * 100.0, 1)
+            for h in daylight
+        }
+
+    if profile == "ramp_up":
+        peak_hour = max(daylight, key=lambda h: hourly_radiation.get(h, 0.0))
+        plan = {}
+        for h in daylight:
+            if h <= peak_hour:
+                plan[h] = round(hourly_radiation.get(h, 0.0) / peak_rad * 100.0, 1)
+            else:
+                plan[h] = 100.0
+        return plan
+
+    return {h: 100.0 for h in daylight}  # fallback
+
+
+# ---------------------------------------------------------------------------
+# State file helpers
+# ---------------------------------------------------------------------------
+
+def _load_state(path: str) -> Optional[dict]:
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _should_skip_write(
+    state: Optional[dict],
+    storctl_mod: int,
+    inw_rte: int,
+    out_w_rte: Optional[int],
+    now: datetime.datetime,
+) -> bool:
+    """Return True if the setpoint is unchanged within the current clock-hour."""
+    if state is None:
+        return False
+    sp = state.get("setpoint", {})
+    if sp.get("storctl_mod") != storctl_mod:
+        return False
+    if sp.get("inw_rte") != inw_rte:
+        return False
+    if sp.get("out_w_rte") != out_w_rte:
+        return False
+    try:
+        written_at_str = sp["written_at"]
+        # Parse as UTC if no tzinfo
+        written_at = datetime.datetime.fromisoformat(written_at_str)
+        if written_at.tzinfo is None:
+            written_at = written_at.replace(tzinfo=datetime.timezone.utc)
+        now_utc = now.astimezone(datetime.timezone.utc) if now.tzinfo else now.replace(tzinfo=datetime.timezone.utc)
+        # Same clock-hour in UTC
+        if (written_at.year == now_utc.year and written_at.month == now_utc.month
+                and written_at.day == now_utc.day and written_at.hour == now_utc.hour):
+            return True
+    except (KeyError, ValueError, TypeError):
+        pass
+    return False
+
+
+def _update_state_setpoint(
+    path: str,
+    storctl_mod: int,
+    inw_rte: int,
+    out_w_rte: Optional[int],
+    now: datetime.datetime,
+) -> None:
+    state = _load_state(path) or {}
+    now_utc = now.astimezone(datetime.timezone.utc) if now.tzinfo else now.replace(tzinfo=datetime.timezone.utc)
+    state["setpoint"] = {
+        "written_at": now_utc.isoformat(),
+        "storctl_mod": storctl_mod,
+        "inw_rte": inw_rte,
+        "out_w_rte": out_w_rte,
+    }
+    with open(path, "w") as f:
+        json.dump(state, f)
+
+
+def _update_state_plan(
+    path: str,
+    date: datetime.date,
+    profile: str,
+    rates: dict[int, float],
+) -> None:
+    state = _load_state(path) or {}
+    state["charging_plan"] = {
+        "date": date.isoformat(),
+        "profile": profile,
+        "rates": {str(k): v for k, v in rates.items()},
+    }
+    with open(path, "w") as f:
+        json.dump(state, f)
+
+
+def _conditional_write(
+    state: Optional[dict],
+    cfg: "Config",
+    storage,
+    inw_rte: int,
+    out_w_rte: Optional[int],
+    storctl_mod: int,
+    dry_run: bool,
+    now: datetime.datetime,
+) -> None:
+    """Write setpoint, skipping if state file says same-hour and same-setpoint."""
+    if cfg.statefile_enabled and _should_skip_write(state, storctl_mod, inw_rte, out_w_rte, now):
+        log.info("State file: setpoint unchanged in current hour - skipping Modbus write")
+        return
+    write_storage_model(storage, inw_rte, out_w_rte, storctl_mod, dry_run)
+    if cfg.statefile_enabled and not dry_run:
+        _update_state_setpoint(cfg.statefile_path, storctl_mod, inw_rte, out_w_rte, now)
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +759,7 @@ def estimate_tomorrow_kwh(
 ) -> float:
     """Estimate tomorrow's PV yield from Open-Meteo's shortwave radiation sum.
 
-    shortwave_mj_per_m2: daily radiation sum in MJ/m² (from Open-Meteo).
+    shortwave_mj_per_m2: daily radiation sum in MJ/m^2 (from Open-Meteo).
     pv_peak_kwp:         installed peak power in kWp.
     performance_ratio:   system losses factor (typically 0.70-0.80).
     """
@@ -499,7 +767,7 @@ def estimate_tomorrow_kwh(
     return kwh_per_m2 * pv_peak_kwp * performance_ratio
 
 
-def _is_weather_cache_valid(cache: dict, cfg: Config, today: datetime.date) -> bool:
+def _is_weather_cache_valid(cache: dict, cfg: "Config", today: datetime.date) -> bool:
     """Return True if the cache is fresh, for the right date, and the right location."""
     try:
         if abs(cache["latitude"] - cfg.latitude) > 0.01:
@@ -532,6 +800,7 @@ def _write_weather_cache(
     lon: float,
     target_date: str,
     expected_kwh: float,
+    hourly_radiation: Optional[dict] = None,
 ) -> None:
     cache = {
         "latitude": lat,
@@ -540,14 +809,29 @@ def _write_weather_cache(
         "target_date": target_date,
         "expected_kwh": expected_kwh,
     }
+    if hourly_radiation:
+        cache["hourly_radiation"] = hourly_radiation
     with open(path, "w") as f:
         json.dump(cache, f)
+
+
+def _get_hourly_radiation(cache: dict, for_date: datetime.date) -> Optional[dict[int, float]]:
+    """Extract {hour_int: W/m^2} for for_date from the cache dict. Returns None if not present."""
+    hourly = cache.get("hourly_radiation")
+    if not hourly:
+        return None
+    date_str = for_date.isoformat()
+    day_data = hourly.get(date_str)
+    if not day_data:
+        return None
+    # Keys may be strings (JSON) or ints; normalize to int
+    return {int(k): float(v) for k, v in day_data.items()}
 
 
 def _fetch_open_meteo(lat: float, lon: float, tz_name: str, target_date: str) -> float:
     """Fetch shortwave_radiation_sum for target_date from Open-Meteo.
 
-    Returns expected kWh/m² (already unit-converted) for the target date.
+    Returns expected kWh/m^2 (already unit-converted) for the target date.
     Raises RuntimeError on network or parse failure.
     """
     url = (
@@ -576,7 +860,45 @@ def _fetch_open_meteo(lat: float, lon: float, tz_name: str, target_date: str) ->
     return mj
 
 
-def get_or_refresh_forecast(cfg: Config, today: datetime.date) -> Optional[float]:
+def _fetch_open_meteo_extended(lat: float, lon: float, tz_name: str, dates: list[str]) -> tuple[dict[str, float], dict[str, dict[int, float]]]:
+    """Fetch daily shortwave_radiation_sum and hourly shortwave_radiation from Open-Meteo.
+
+    Returns:
+        daily_mj: {date_str: MJ/m^2}
+        hourly_rad: {date_str: {hour_int: W/m^2}}
+    """
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        "&daily=shortwave_radiation_sum"
+        "&hourly=shortwave_radiation"
+        f"&timezone={urllib.parse.quote(tz_name)}"
+        "&forecast_days=3"
+    )
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Open-Meteo request failed: {exc}") from exc
+
+    # Parse daily
+    daily_mj: dict[str, float] = {}
+    for d, v in zip(data["daily"]["time"], data["daily"]["shortwave_radiation_sum"]):
+        if d in dates:
+            daily_mj[d] = float(v) if v is not None else 0.0
+
+    # Parse hourly: time strings like "2026-08-05T06:00"
+    hourly_rad: dict[str, dict[int, float]] = {}
+    for time_str, rad in zip(data["hourly"]["time"], data["hourly"]["shortwave_radiation"]):
+        date_str = time_str[:10]
+        hour = int(time_str[11:13])
+        if date_str in dates:
+            hourly_rad.setdefault(date_str, {})[hour] = float(rad) if rad is not None else 0.0
+
+    return daily_mj, hourly_rad
+
+
+def get_or_refresh_forecast(cfg: "Config", today: datetime.date) -> Optional[float]:
     """Return tomorrow's expected kWh, refreshing the cache when needed.
 
     Returns None and logs a warning if the fetch fails and no usable cache exists.
@@ -584,21 +906,23 @@ def get_or_refresh_forecast(cfg: Config, today: datetime.date) -> Optional[float
     cache = _read_weather_cache(cfg.cache_path)
     if cache and _is_weather_cache_valid(cache, cfg, today):
         expected = cache["expected_kwh"]
-        log.info(
-            "Weather cache valid - tomorrow's expected production: %.1f kWh", expected
-        )
+        log.info("Weather cache valid - tomorrow's expected production: %.1f kWh", expected)
         return expected
 
     log.info("Weather cache absent or stale - fetching from Open-Meteo")
     tomorrow = (today + datetime.timedelta(days=1)).isoformat()
+    today_str = today.isoformat()
     try:
-        mj = _fetch_open_meteo(cfg.latitude, cfg.longitude, cfg.timezone, tomorrow)
+        daily_mj, hourly_rad = _fetch_open_meteo_extended(
+            cfg.latitude, cfg.longitude, cfg.timezone, [today_str, tomorrow]
+        )
+        mj = daily_mj.get(tomorrow, 0.0)
         expected = estimate_tomorrow_kwh(mj, cfg.pv_peak_kwp, cfg.performance_ratio)
         log.info(
-            "Forecast %s: %.1f MJ/m² -> %.1f kWh (%.1f kWp × PR %.2f)",
+            "Forecast %s: %.1f MJ/m^2 -> %.1f kWh (%.1f kWp * PR %.2f)",
             tomorrow, mj, expected, cfg.pv_peak_kwp, cfg.performance_ratio,
         )
-        _write_weather_cache(cfg.cache_path, cfg.latitude, cfg.longitude, tomorrow, expected)
+        _write_weather_cache(cfg.cache_path, cfg.latitude, cfg.longitude, tomorrow, expected, hourly_rad)
         return expected
     except RuntimeError as exc:
         log.warning("Forecast fetch failed: %s - falling back to exporting", exc)
@@ -609,7 +933,7 @@ def get_or_refresh_forecast(cfg: Config, today: datetime.date) -> Optional[float
 # Modbus I/O helpers
 # ---------------------------------------------------------------------------
 
-def connect_device(cfg: Config):
+def connect_device(cfg: "Config"):
     """Connect to the SunSpec device and return a scanned device object."""
     if not cfg.host:
         log.error("No host configured. Set [connection] host in config or --connection.host")
@@ -765,15 +1089,20 @@ def cmd_forecast(args) -> None:
 
     today = datetime.date.today()
     tomorrow = (today + datetime.timedelta(days=1)).isoformat()
+    today_str = today.isoformat()
+
     try:
-        mj = _fetch_open_meteo(cfg.latitude, cfg.longitude, cfg.timezone, tomorrow)
+        daily_mj, hourly_rad = _fetch_open_meteo_extended(
+            cfg.latitude, cfg.longitude, cfg.timezone, [today_str, tomorrow]
+        )
+        mj = daily_mj.get(tomorrow, 0.0)
     except RuntimeError as exc:
         log.error("%s", exc)
         sys.exit(1)
 
     expected = estimate_tomorrow_kwh(mj, cfg.pv_peak_kwp, cfg.performance_ratio)
     log.info(
-        "Forecast %s: %.1f MJ/m² -> %.1f kWh (%.1f kWp × PR %.2f)",
+        "Forecast %s: %.1f MJ/m^2 -> %.1f kWh (%.1f kWp * PR %.2f)",
         tomorrow, mj, expected, cfg.pv_peak_kwp, cfg.performance_ratio,
     )
 
@@ -781,7 +1110,7 @@ def cmd_forecast(args) -> None:
         log.info("Dry-run - would write cache to %s", cfg.cache_path)
         return
 
-    _write_weather_cache(cfg.cache_path, cfg.latitude, cfg.longitude, tomorrow, expected)
+    _write_weather_cache(cfg.cache_path, cfg.latitude, cfg.longitude, tomorrow, expected, hourly_rad)
     log.info("Cache written: %s", cfg.cache_path)
 
 
@@ -807,6 +1136,9 @@ def cmd_run(args) -> None:
         cfg.feat_night_grid_export,
         cfg.feat_weather_aware,
     )
+
+    # Load state file early
+    state = _load_state(cfg.statefile_path) if cfg.statefile_enabled else None
 
     # --- connect and read model 124 -----------------------------------------
     device = connect_device(cfg)
@@ -847,57 +1179,90 @@ def cmd_run(args) -> None:
     # When location features are not enabled we skip sun time computation.
     now: datetime.datetime
     phase: str
+    today_sun: Optional[dict] = None
 
-    if (
+    needs_time = (
         cfg.feat_end_of_day_full_charge
         or cfg.feat_night_grid_export
         or cfg.feat_charge_limit
-    ):
-        tz = ZoneInfo(cfg.timezone) if cfg.timezone else None
-
-        if tz and cfg.latitude is not None and cfg.longitude is not None:
-            now = datetime.datetime.now(tz=tz)
-            today = now.date()
-            today_sun = get_sun_times(cfg.latitude, cfg.longitude, cfg.timezone, today)
-            sunrise = today_sun["sunrise"]
-            sunset = today_sun["sunset"]
-            phase = determine_phase(now, sunrise, sunset, cfg.lead_time_minutes)
-            log.info(
-                "Phase: %s  now=%s  sunrise=%s  sunset=%s",
-                phase,
-                now.strftime("%H:%M"),
-                sunrise.strftime("%H:%M"),
-                sunset.strftime("%H:%M"),
-            )
-        else:
-            # No location configured - only day-time features can work
-            now = datetime.datetime.now()
-            today = now.date()
-            phase = PHASE_DAY
+        or cfg.feat_charge_windows
+    )
+    if needs_time and cfg.timezone:
+        tz = ZoneInfo(cfg.timezone)
+        now = datetime.datetime.now(tz=tz)
     else:
+        tz = None
         now = datetime.datetime.now()
-        today = now.date()
+
+    today = now.date()
+
+    if tz and cfg.latitude is not None and cfg.longitude is not None:
+        today_sun = get_sun_times(cfg.latitude, cfg.longitude, cfg.timezone, today)
+        sunrise = today_sun["sunrise"]
+        sunset = today_sun["sunset"]
+        phase = determine_phase(now, sunrise, sunset, cfg.lead_time_minutes)
+        log.info("Phase: %s  now=%s  sunrise=%s  sunset=%s", phase, now.strftime("%H:%M"), sunrise.strftime("%H:%M"), sunset.strftime("%H:%M"))
+    else:
         phase = PHASE_DAY
+
+    # --- generate charging plan if profile is set ---------------------------
+    charging_plan: Optional[dict[int, float]] = None
+    if cfg.charging_profile != "none" and cfg.pv_peak_kwp > 0:
+        # Try to load from state file
+        plan_loaded = False
+        if state:
+            plan_cache = state.get("charging_plan", {})
+            if (plan_cache.get("date") == today.isoformat()
+                    and plan_cache.get("profile") == cfg.charging_profile):
+                charging_plan = {int(k): v for k, v in plan_cache.get("rates", {}).items()}
+                log.info("Loaded %s charging plan from state file (%d slots)", cfg.charging_profile, len(charging_plan))
+                plan_loaded = True
+
+        if not plan_loaded:
+            weather_cache = _read_weather_cache(cfg.cache_path)
+            if weather_cache:
+                today_hourly = _get_hourly_radiation(weather_cache, today)
+                if today_hourly and cfg.latitude is not None:
+                    # Re-use today_sun if already computed
+                    if today_sun is not None:
+                        plan_sunrise_h = today_sun["sunrise"].hour
+                        plan_sunset_h = today_sun["sunset"].hour
+                    else:
+                        plan_sun = get_sun_times(cfg.latitude, cfg.longitude, cfg.timezone, today)
+                        plan_sunrise_h = plan_sun["sunrise"].hour
+                        plan_sunset_h = plan_sun["sunset"].hour
+                    charging_plan = generate_charging_plan(
+                        today_hourly, cfg.charging_profile,
+                        cfg.pv_peak_kwp, cfg.performance_ratio,
+                        plan_sunrise_h, plan_sunset_h,
+                    )
+                    log.info("Generated %s charging plan: %s", cfg.charging_profile, charging_plan)
+                    if cfg.statefile_enabled and not args.dry_run:
+                        _update_state_plan(cfg.statefile_path, today, cfg.charging_profile, charging_plan)
+                else:
+                    log.warning("No hourly forecast data for today - charging_profile %s has no effect", cfg.charging_profile)
+            else:
+                log.warning("No weather cache - charging_profile %s has no effect (run: batctl forecast)", cfg.charging_profile)
 
     # --- apply control logic per phase --------------------------------------
 
     if phase == PHASE_NIGHT and cfg.feat_night_grid_export:
-        _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now, today)
+        _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now, today, state=state)
         return
 
     if phase == PHASE_END_OF_DAY and cfg.feat_end_of_day_full_charge:
-        _apply_eod_charge(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw)
+        _apply_eod_charge(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now, state=state)
         return
 
     # DAY (or night/end_of_day with features disabled) -> apply charge limiting
-    _apply_charge_control(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw)
+    _apply_charge_control(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now, state=state, charging_plan=charging_plan)
 
 
-def _apply_eod_charge(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw):
+def _apply_eod_charge(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now, state=None):
     """End-of-day full charge: upper SOC cap is lifted; apply eod_charge_taper if set."""
     if not cfg.eod_charge_taper:
         log.info("End-of-day: lifting all charge limits (charging to 100%%)")
-        write_storage_model(storage, max_raw, max_raw, 0, args.dry_run)
+        _conditional_write(state, cfg, storage, max_raw, max_raw, 0, args.dry_run, now)
         return
 
     inw_rte, storctl = compute_charge_setpoint(
@@ -920,13 +1285,44 @@ def _apply_eod_charge(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw):
             "End-of-day: SoC %.2f%% - taper limits charge to %.2f%% (raw %d, StorCtl_Mod=1)",
             soc, rate_pct, inw_rte,
         )
-    write_storage_model(storage, inw_rte, max_raw, storctl, args.dry_run)
+    _conditional_write(state, cfg, storage, inw_rte, max_raw, storctl, args.dry_run, now)
 
 
-def _apply_charge_control(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw):
+def _apply_charge_control(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now, state=None, charging_plan=None):
     """Apply taper + optional upper-limit charge control."""
-    if not cfg.feat_charge_limit and not cfg.charge_taper:
+
+    # Charge windows check: outside windows -> throttle to minimum
+    if cfg.feat_charge_windows and cfg.charge_windows:
+        tz = ZoneInfo(cfg.timezone) if cfg.timezone else None
+        now_local = now.astimezone(tz) if (tz and now.tzinfo) else now
+        now_time = now_local.time()
+        if not is_in_charging_window(now_time, cfg.charge_windows):
+            min_raw = int(cfg.min_charge_rate_w / wchamax * 100.0 * (10 ** abs(sf))) if wchamax > 0 else 0
+            min_raw = min(min_raw, int(100 * (10 ** abs(sf))))
+            log.info("SoC %.2f%% - outside charging window at %s -> min rate (raw %d, StorCtl_Mod=1)", soc, now_time.strftime("%H:%M"), min_raw)
+            _conditional_write(state, cfg, storage, min_raw, None, 1, args.dry_run, now)
+            return
+
+    if not cfg.feat_charge_limit and not cfg.charge_taper and cfg.charging_profile == "none":
         log.info("No charge_limit feature and no taper rules - nothing to do")
+        return
+
+    # Profile ceiling for current hour
+    profile_ceiling_raw = max_raw
+    if cfg.charging_profile != "none" and charging_plan is not None:
+        hour_val = now.hour if isinstance(now, datetime.datetime) else 0
+        hour_rate_pct = charging_plan.get(hour_val, 100.0)
+        if hour_rate_pct <= 0.0:
+            log.info("Profile %s: zero rate at hour %02d - blocking charge (InWRte=0, StorCtl_Mod=1)", cfg.charging_profile, hour_val)
+            _conditional_write(state, cfg, storage, 0, None, 1, args.dry_run, now)
+            return
+        profile_ceiling_raw = min(max_raw, int(hour_rate_pct / 100.0 * max_raw))
+        log.info("Profile %s ceiling at hour %02d: %.1f%% (raw %d)", cfg.charging_profile, hour_val, hour_rate_pct, profile_ceiling_raw)
+
+    if not cfg.feat_charge_limit and not cfg.charge_taper:
+        # Only profile active, no taper/limit: apply profile ceiling directly
+        storctl = 1 if profile_ceiling_raw < max_raw else 0
+        _conditional_write(state, cfg, storage, profile_ceiling_raw, None, storctl, args.dry_run, now)
         return
 
     inw_rte, storctl = compute_charge_setpoint(
@@ -955,10 +1351,16 @@ def _apply_charge_control(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw)
             soc, rate_pct, inw_rte,
         )
 
-    write_storage_model(storage, inw_rte, None, storctl, args.dry_run)
+    # Apply profile ceiling (profile is more restrictive than taper -> take minimum)
+    if inw_rte > 0 and profile_ceiling_raw < inw_rte:
+        inw_rte = profile_ceiling_raw
+        if storctl == 0:
+            storctl = 1
+
+    _conditional_write(state, cfg, storage, inw_rte, None, storctl, args.dry_run, now)
 
 
-def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now, today):
+def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now, today, state=None):
     """Apply controlled discharge for night grid export."""
     # Weather check
     if cfg.feat_weather_aware:
@@ -968,7 +1370,7 @@ def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, n
                 "Tomorrow's forecast %.1f kWh < threshold %.1f kWh - skipping grid export",
                 expected_kwh, cfg.skip_export_below_kwh,
             )
-            write_storage_model(storage, max_raw, max_raw, 0, args.dry_run)
+            _conditional_write(state, cfg, storage, max_raw, max_raw, 0, args.dry_run, now)
             return
         if expected_kwh is None:
             log.info("No forecast available - proceeding with export (fail-open)")
@@ -979,7 +1381,7 @@ def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, n
             "SoC %.2f%% at/below reserve %.1f%% - stopping discharge",
             soc, cfg.reserve_soc,
         )
-        write_storage_model(storage, max_raw, max_raw, 0, args.dry_run)
+        _conditional_write(state, cfg, storage, max_raw, max_raw, 0, args.dry_run, now)
         return
 
     # Compute hours until next sunrise.
@@ -997,10 +1399,34 @@ def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, n
 
     if now >= next_sunrise:
         log.info("Sunrise imminent - stopping discharge")
-        write_storage_model(storage, max_raw, max_raw, 0, args.dry_run)
+        _conditional_write(state, cfg, storage, max_raw, max_raw, 0, args.dry_run, now)
         return
 
     hours_left = (next_sunrise - now).total_seconds() / 3600.0
+
+    # Compute effective discharge horizon
+    extend_h = 0.0
+    if cfg.extend_hours_auto:
+        if cfg.pv_peak_kwp > 0:
+            cache = _read_weather_cache(cfg.cache_path)
+            if cache:
+                tomorrow_date = (today if now < today_sunrise else today + datetime.timedelta(days=1))
+                tomorrow_hourly = _get_hourly_radiation(cache, tomorrow_date)
+                if tomorrow_hourly:
+                    extend_h = compute_auto_extend_hours(
+                        tomorrow_hourly, cfg.avg_base_load_w,
+                        cfg.pv_peak_kwp, cfg.performance_ratio,
+                        next_sunrise.hour,
+                    )
+                    log.info("Auto extend_hours: %.1fh (solar covers avg load %.0f W at sunrise+%.1fh)",
+                             extend_h, cfg.avg_base_load_w, extend_h)
+                else:
+                    log.warning("No hourly forecast data - cannot compute auto extend_hours, using 0")
+        else:
+            log.warning("extend_hours=auto requires [weather] pv_peak_kwp > 0, using 0")
+    elif cfg.extend_hours > 0:
+        extend_h = cfg.extend_hours
+        log.info("Discharge horizon extended by %.1fh (configured)", extend_h)
 
     out_raw = compute_discharge_setpoint(
         soc=soc,
@@ -1011,15 +1437,17 @@ def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, n
         min_discharge_w=cfg.min_discharge_rate_w,
         avg_base_load_w=cfg.avg_base_load_w,
         sf=sf,
+        extend_hours=extend_h,
     )
 
     if out_raw is None:
         log.info("Discharge setpoint: nothing to discharge - restoring defaults")
-        write_storage_model(storage, max_raw, max_raw, 0, args.dry_run)
+        _conditional_write(state, cfg, storage, max_raw, max_raw, 0, args.dry_run, now)
         return
 
     energy_left = (soc - cfg.reserve_soc) / 100.0 * cfg.capacity_kwh
-    required_w = energy_left * 1000.0 / hours_left
+    effective_hours = hours_left + extend_h
+    required_w = energy_left * 1000.0 / (effective_hours if effective_hours > 0 else hours_left)
     if cfg.avg_base_load_w > 0:
         required_w = required_w + cfg.avg_base_load_w
     rate_pct = out_raw / (10 ** sf_abs)
@@ -1031,7 +1459,7 @@ def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, n
     # StorCtl_Mod=1: discharge limit NOT active, charge limit active
     # don't get confused, setting a _charge_ limit with a negative value
     # actually means discharge with at least out_raw Watt.
-    write_storage_model(storage, out_raw, None, 1, args.dry_run)
+    _conditional_write(state, cfg, storage, out_raw, None, 1, args.dry_run, now)
 
 
 # ---------------------------------------------------------------------------

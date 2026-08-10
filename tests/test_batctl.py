@@ -1,5 +1,5 @@
 """
-Unit tests for batctl.py — pure-logic functions only; no hardware, no network.
+Unit tests for batctl.py - pure-logic functions only; no hardware, no network.
 """
 
 import datetime
@@ -20,10 +20,14 @@ from batctl import (
     PHASE_END_OF_DAY,
     PHASE_NIGHT,
     _is_weather_cache_valid,
+    _should_skip_write,
+    compute_auto_extend_hours,
     compute_charge_setpoint,
     compute_discharge_setpoint,
     determine_phase,
     estimate_tomorrow_kwh,
+    generate_charging_plan,
+    is_in_charging_window,
     load_config,
     update_config_file,
     validate_features,
@@ -250,7 +254,7 @@ class TestDeterminePhase:
         assert determine_phase(_dt(13, 0), _sunrise(), _sunset(), 120) == PHASE_DAY
 
     def test_just_before_eod_window_is_day(self):
-        # lead=120 min → eod starts at 18:00 (sunset 20:00 - 2h)
+        # lead=120 min -> eod starts at 18:00 (sunset 20:00 - 2h)
         assert determine_phase(_dt(17, 59), _sunrise(), _sunset(), 120) == PHASE_DAY
 
     def test_at_eod_window_start_is_eod(self):
@@ -266,7 +270,7 @@ class TestDeterminePhase:
         assert determine_phase(_dt(23, 0), _sunrise(), _sunset(), 120) == PHASE_NIGHT
 
     def test_zero_lead_time(self):
-        # With lead=0, EOD window is zero-width → no EOD phase
+        # With lead=0, EOD window is zero-width -> no EOD phase
         assert determine_phase(_dt(19, 59), _sunrise(), _sunset(), 0) == PHASE_DAY
         assert determine_phase(_dt(20, 0), _sunrise(), _sunset(), 0) == PHASE_NIGHT
 
@@ -276,7 +280,7 @@ class TestDeterminePhase:
 # ---------------------------------------------------------------------------
 
 class TestComputeChargeSetpoint:
-    # SF=-2 → max_raw = int(100 * 10^2) = 10000
+    # SF=-2 -> max_raw = int(100 * 10^2) = 10000
     SF = -2
     WCHAMAX = 5000.0
 
@@ -296,18 +300,18 @@ class TestComputeChargeSetpoint:
             min_charge_rate_w=0.0, wchamax_w=self.WCHAMAX,
             sf=self.SF, feat_charge_limit=False,
         )
-        # scale 0.30 × 100% × 10^2 = 3000
+        # scale 0.30 x 100% x 10^2 = 3000
         assert inw == 3000
         assert mod == 1
 
     def test_taper_min_charge_floor(self):
-        taper = [(95.0, 0.01)]  # 1% → 50 W < min 300 W → 6%
+        taper = [(95.0, 0.01)]  # 1% -> 50 W < min 300 W -> 6%
         inw, mod = compute_charge_setpoint(
             soc=96.0, taper=taper, upper_soc_limit=99.0,
             min_charge_rate_w=300.0, wchamax_w=self.WCHAMAX,
             sf=self.SF, feat_charge_limit=False,
         )
-        # min_rate_pct = 300/5000*100 = 6.0% → raw = 600
+        # min_rate_pct = 300/5000*100 = 6.0% -> raw = 600
         assert inw == 600
         assert mod == 1
 
@@ -328,7 +332,7 @@ class TestComputeChargeSetpoint:
             min_charge_rate_w=0.0, wchamax_w=self.WCHAMAX,
             sf=self.SF, feat_charge_limit=True,
         )
-        # Below all taper thresholds → full rate
+        # Below all taper thresholds -> full rate
         assert inw == 10000
         assert mod == 0
 
@@ -383,8 +387,8 @@ class TestComputeDischargeSetpoint:
         assert result == expected_raw
 
     def test_min_rate_floor_applied(self):
-        # Very small SOC margin: required_w would be tiny → floor kicks in
-        # min_pct = 300/5000*100 = 6%  → raw = -600  (negative = discharge)
+        # Very small SOC margin: required_w would be tiny -> floor kicks in
+        # min_pct = 300/5000*100 = 6%  -> raw = -600  (negative = discharge)
         result = compute_discharge_setpoint(
             soc=13.0, reserve_soc=12.0, capacity_kwh=self.CAPACITY,
             hours_left=8.0, wchamax_w=self.WCHAMAX,
@@ -394,16 +398,16 @@ class TestComputeDischargeSetpoint:
         assert result == -600
 
     def test_rate_capped_at_100_percent(self):
-        # Very little time left → required_w exceeds WChaMax → capped at -10000
+        # Very little time left -> required_w exceeds WChaMax -> capped at -10000
         result = compute_discharge_setpoint(
             soc=100.0, reserve_soc=12.0, capacity_kwh=self.CAPACITY,
             hours_left=0.01, wchamax_w=self.WCHAMAX,
             min_discharge_w=0.0, avg_base_load_w=0.0, sf=self.SF,
         )
-        assert result == -10000  # -100% × 100 (SF=-2)
+        assert result == -10000  # -100% x 100 (SF=-2)
 
     def test_avg_base_load_added_to_required(self):
-        # Without base load: required ≈ 655 W; with 200 W base load: 855 W
+        # Without base load: required ~= 655 W; with 200 W base load: 855 W
         result_no_base = compute_discharge_setpoint(
             soc=80.0, reserve_soc=12.0, capacity_kwh=self.CAPACITY,
             hours_left=8.0, wchamax_w=self.WCHAMAX,
@@ -416,7 +420,7 @@ class TestComputeDischargeSetpoint:
         )
         assert result_with_base is not None
         assert result_no_base is not None
-        # base load adds 200 W → higher magnitude discharge rate
+        # base load adds 200 W -> higher magnitude discharge rate
         assert result_with_base < result_no_base  # more negative = higher rate
 
     def test_sf_zero(self):
@@ -425,7 +429,7 @@ class TestComputeDischargeSetpoint:
             hours_left=8.0, wchamax_w=self.WCHAMAX,
             min_discharge_w=0.0, avg_base_load_w=0.0, sf=0,
         )
-        # SF=0 → raw = -round(rate_pct * 1)
+        # SF=0 -> raw = -round(rate_pct * 1)
         energy = (50.0 - 12.0) / 100.0 * 7.7
         required_w = energy * 1000.0 / 8.0
         expected_raw = -round(required_w / 5000.0 * 100.0)
@@ -438,7 +442,7 @@ class TestComputeDischargeSetpoint:
 
 class TestEstimateTomorrowKwh:
     def test_known_values(self):
-        # 18 MJ/m² / 3.6 = 5 kWh/m², × 8 kWp × 0.75 = 30 kWh
+        # 18 MJ/m2 / 3.6 = 5 kWh/m2, x 8 kWp x 0.75 = 30 kWh
         result = estimate_tomorrow_kwh(18.0, 8.0, 0.75)
         assert result == pytest.approx(30.0, rel=1e-6)
 
@@ -494,3 +498,218 @@ class TestWeatherCacheValid:
         today = datetime.date.today()
         assert not _is_weather_cache_valid({}, self._cfg(), today)
         assert not _is_weather_cache_valid({"latitude": "bad"}, self._cfg(), today)
+
+
+# ---------------------------------------------------------------------------
+# is_in_charging_window
+# ---------------------------------------------------------------------------
+
+class TestIsInChargingWindow:
+    def _t(self, h, m=0):
+        return datetime.time(h, m)
+
+    def test_empty_windows_always_true(self):
+        assert is_in_charging_window(self._t(12), []) is True
+
+    def test_inside_window(self):
+        assert is_in_charging_window(self._t(12), [(self._t(10), self._t(15))]) is True
+
+    def test_outside_window(self):
+        assert is_in_charging_window(self._t(16), [(self._t(10), self._t(15))]) is False
+
+    def test_at_start_is_inside(self):
+        assert is_in_charging_window(self._t(10), [(self._t(10), self._t(15))]) is True
+
+    def test_at_end_is_outside(self):
+        assert is_in_charging_window(self._t(15), [(self._t(10), self._t(15))]) is False
+
+    def test_midnight_crossing_before_midnight(self):
+        assert is_in_charging_window(self._t(23), [(self._t(22), self._t(6))]) is True
+
+    def test_midnight_crossing_after_midnight(self):
+        assert is_in_charging_window(self._t(3), [(self._t(22), self._t(6))]) is True
+
+    def test_midnight_crossing_outside(self):
+        assert is_in_charging_window(self._t(12), [(self._t(22), self._t(6))]) is False
+
+    def test_multiple_windows_first_matches(self):
+        windows = [(self._t(8), self._t(10)), (self._t(14), self._t(16))]
+        assert is_in_charging_window(self._t(9), windows) is True
+        assert is_in_charging_window(self._t(12), windows) is False
+        assert is_in_charging_window(self._t(15), windows) is True
+
+
+# ---------------------------------------------------------------------------
+# compute_auto_extend_hours
+# ---------------------------------------------------------------------------
+
+class TestComputeAutoExtendHours:
+    def test_solar_covers_load_at_sunrise_plus_1h(self):
+        # At sunrise hour (6): 100 W/m2 x 8 kWp x 0.75 = 600 W < 800 W
+        # At sunrise+1 (7): 200 W/m2 -> 1200 W >= 800 W -> extend = 1h
+        hourly = {6: 100.0, 7: 200.0, 8: 500.0}
+        result = compute_auto_extend_hours(hourly, 800.0, 8.0, 0.75, sunrise_hour=6)
+        assert result == pytest.approx(1.0)
+
+    def test_solar_covers_load_at_sunrise(self):
+        # At sunrise (6): 300 W/m2 x 8 x 0.75 = 1800 W >= 800 W -> extend = 0h
+        hourly = {6: 300.0, 7: 500.0}
+        result = compute_auto_extend_hours(hourly, 800.0, 8.0, 0.75, sunrise_hour=6)
+        assert result == pytest.approx(0.0)
+
+    def test_solar_never_covers_returns_max(self):
+        # All hours too low
+        hourly = {6: 10.0, 7: 20.0, 8: 30.0}
+        result = compute_auto_extend_hours(hourly, 5000.0, 8.0, 0.75, sunrise_hour=6, max_extend_h=3.0)
+        assert result == pytest.approx(3.0)
+
+    def test_empty_hourly_returns_max(self):
+        result = compute_auto_extend_hours({}, 500.0, 8.0, 0.75, sunrise_hour=6, max_extend_h=2.0)
+        assert result == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# generate_charging_plan
+# ---------------------------------------------------------------------------
+
+class TestGenerateChargingPlan:
+    HOURLY = {6: 50.0, 7: 200.0, 8: 500.0, 9: 800.0, 10: 1000.0, 11: 900.0, 12: 800.0, 13: 600.0, 14: 400.0, 15: 100.0, 16: 50.0}
+    PV_KWP = 8.0
+    PR = 0.75
+
+    def test_spread_gives_uniform_100(self):
+        plan = generate_charging_plan(self.HOURLY, "spread", self.PV_KWP, self.PR, 6, 16)
+        assert all(v == 100.0 for v in plan.values())
+        assert set(plan.keys()) == set(range(6, 17))
+
+    def test_solar_follow_peak_is_100(self):
+        plan = generate_charging_plan(self.HOURLY, "solar_follow", self.PV_KWP, self.PR, 6, 16)
+        assert plan[10] == pytest.approx(100.0)  # 1000 W/m2 = peak
+        assert plan[6] < plan[10]  # early morning lower than peak
+
+    def test_solar_follow_proportional(self):
+        plan = generate_charging_plan(self.HOURLY, "solar_follow", self.PV_KWP, self.PR, 6, 16)
+        # 7: 200/1000 = 20%, 8: 500/1000 = 50%
+        assert plan[7] == pytest.approx(20.0)
+        assert plan[8] == pytest.approx(50.0)
+
+    def test_ramp_up_after_peak_is_100(self):
+        plan = generate_charging_plan(self.HOURLY, "ramp_up", self.PV_KWP, self.PR, 6, 16)
+        # Peak at hour 10; hours 11-16 should be 100%
+        for h in range(11, 17):
+            assert plan[h] == pytest.approx(100.0)
+
+    def test_ramp_up_before_peak_proportional(self):
+        plan = generate_charging_plan(self.HOURLY, "ramp_up", self.PV_KWP, self.PR, 6, 16)
+        assert plan[6] == pytest.approx(5.0)   # 50/1000
+        assert plan[10] == pytest.approx(100.0)  # peak
+
+    def test_no_radiation_gives_full_rate(self):
+        plan = generate_charging_plan({}, "solar_follow", self.PV_KWP, self.PR, 6, 16)
+        assert all(v == 100.0 for v in plan.values())
+
+    def test_unknown_profile_gives_full_rate(self):
+        plan = generate_charging_plan(self.HOURLY, "unknown_profile", self.PV_KWP, self.PR, 6, 16)
+        assert all(v == 100.0 for v in plan.values())
+
+
+# ---------------------------------------------------------------------------
+# _should_skip_write
+# ---------------------------------------------------------------------------
+
+class TestShouldSkipWrite:
+    def _state(self, storctl=1, inw=-1000, outw=None, hours_ago=0):
+        now_utc = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours_ago)
+        return {
+            "setpoint": {
+                "written_at": now_utc.isoformat(),
+                "storctl_mod": storctl,
+                "inw_rte": inw,
+                "out_w_rte": outw,
+            }
+        }
+
+    def _now(self):
+        return datetime.datetime.now(datetime.timezone.utc)
+
+    def test_none_state_never_skips(self):
+        assert _should_skip_write(None, 1, -1000, None, self._now()) is False
+
+    def test_same_setpoint_same_hour_skips(self):
+        state = self._state(1, -1000, None, hours_ago=0)
+        assert _should_skip_write(state, 1, -1000, None, self._now()) is True
+
+    def test_different_storctl_does_not_skip(self):
+        state = self._state(1, -1000, None, hours_ago=0)
+        assert _should_skip_write(state, 0, -1000, None, self._now()) is False
+
+    def test_different_inw_does_not_skip(self):
+        state = self._state(1, -1000, None, hours_ago=0)
+        assert _should_skip_write(state, 1, -2000, None, self._now()) is False
+
+    def test_previous_hour_does_not_skip(self):
+        state = self._state(1, -1000, None, hours_ago=1)
+        # written_at is 1 hour ago -> different clock-hour -> don't skip
+        # We check by making the state's written_at exactly 1 hour before now
+        # which would always be a different UTC hour (or same if within same 60-min window)
+        # So this test is: if we forced written_at to be in a previous hour, don't skip
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        prev_hour = now_utc.replace(minute=0, second=0, microsecond=0) - datetime.timedelta(hours=1)
+        state = {"setpoint": {"written_at": prev_hour.isoformat(), "storctl_mod": 1, "inw_rte": -1000, "out_w_rte": None}}
+        assert _should_skip_write(state, 1, -1000, None, now_utc) is False
+
+    def test_corrupt_state_does_not_skip(self):
+        assert _should_skip_write({}, 1, -1000, None, self._now()) is False
+        assert _should_skip_write({"setpoint": {}}, 1, -1000, None, self._now()) is False
+
+
+# ---------------------------------------------------------------------------
+# compute_discharge_setpoint with extend_hours
+# ---------------------------------------------------------------------------
+
+class TestComputeDischargeSetpointExtend:
+    SF = -2
+    WCHAMAX = 5000.0
+    CAPACITY = 7.7
+
+    def test_extend_hours_reduces_rate(self):
+        # Extending the horizon means lower required rate (more time available)
+        result_base = compute_discharge_setpoint(
+            soc=80.0, reserve_soc=12.0, capacity_kwh=self.CAPACITY,
+            hours_left=6.0, wchamax_w=self.WCHAMAX,
+            min_discharge_w=0.0, avg_base_load_w=0.0, sf=self.SF,
+        )
+        result_ext = compute_discharge_setpoint(
+            soc=80.0, reserve_soc=12.0, capacity_kwh=self.CAPACITY,
+            hours_left=6.0, wchamax_w=self.WCHAMAX,
+            min_discharge_w=0.0, avg_base_load_w=0.0, sf=self.SF,
+            extend_hours=2.0,
+        )
+        assert result_base is not None and result_ext is not None
+        # extend_hours=2 -> denominator = 8h instead of 6h -> lower rate
+        assert abs(result_ext) < abs(result_base)
+
+    def test_zero_extend_hours_unchanged(self):
+        # extend_hours=0 is the default - should match original behavior
+        result_no_ext = compute_discharge_setpoint(
+            soc=80.0, reserve_soc=12.0, capacity_kwh=self.CAPACITY,
+            hours_left=6.0, wchamax_w=self.WCHAMAX,
+            min_discharge_w=0.0, avg_base_load_w=0.0, sf=self.SF,
+        )
+        result_zero_ext = compute_discharge_setpoint(
+            soc=80.0, reserve_soc=12.0, capacity_kwh=self.CAPACITY,
+            hours_left=6.0, wchamax_w=self.WCHAMAX,
+            min_discharge_w=0.0, avg_base_load_w=0.0, sf=self.SF,
+            extend_hours=0.0,
+        )
+        assert result_no_ext == result_zero_ext
+
+    def test_zero_hours_left_still_stops(self):
+        # hours_left=0 should still return None even with extend_hours
+        result = compute_discharge_setpoint(
+            soc=80.0, reserve_soc=12.0, capacity_kwh=self.CAPACITY,
+            hours_left=0.0, wchamax_w=self.WCHAMAX,
+            min_discharge_w=0.0, avg_base_load_w=0.0, sf=self.SF,
+            extend_hours=2.0,
+        )
+        assert result is None

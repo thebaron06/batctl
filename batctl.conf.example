@@ -19,34 +19,38 @@ slave_id  = 1                 # Modbus slave ID (default: 1)
 
 # ---------------------------------------------------------------------------
 [features]
-# All features default to false → behaviour is identical to the original
+# All features default to false -> behaviour is identical to the original
 # charge-taper-only mode.  Enable them one by one and test with --dry-run.
 #
 # Compatibility rules (enforced at startup):
 #   end_of_day_full_charge  requires  charge_limit AND [location]
 #   night_grid_export       requires  [location] AND [battery] capacity_kwh > 0
 #   weather_aware           requires  night_grid_export AND [weather] settings
+#   charge_windows          requires  [location] timezone
 # ---------------------------------------------------------------------------
 charge_limit           = false   # cap charging at [charging] upper_soc_limit
 end_of_day_full_charge = false   # lift cap near sunset so battery reaches 100%
-night_grid_export      = false   # discharge to grid overnight (sunset→sunrise)
+night_grid_export      = false   # discharge to grid overnight (sunset->sunrise)
 weather_aware          = false   # skip export when tomorrow's forecast is poor
+charge_windows         = false   # restrict charging to configured time windows
 
 # ---------------------------------------------------------------------------
 [charging]
 # ---------------------------------------------------------------------------
-upper_soc_limit    = 80     # charge_limit hard cap (%) — battery won't charge
+upper_soc_limit    = 80     # charge_limit hard cap (%) - battery won't charge
                             # above this during the day
 min_charge_rate_w  = 300    # lower bound for the taper-computed charge rate (W)
 avg_base_load_w    = 200    # the average base load of your household (W)
+profile            = none   # charging profile; requires [weather] pv_peak_kwp > 0
+                            # options: none / solar_follow / spread / ramp_up
 
 # ---------------------------------------------------------------------------
 [charge_taper]
 # Charge rate reduction rules (replaces charge_rules.conf).
-# Format:  soc_threshold_percent = scale_factor   (scale: 0.0 – 1.0)
+# Format:  soc_threshold_percent = scale_factor   (scale: 0.0 - 1.0)
 # Rules are evaluated highest-threshold-first; first match wins.
 # At the matched SoC the charge rate is capped at:
-#   max(min_charge_rate_w, scale × WChaMax)
+#   max(min_charge_rate_w, scale x WChaMax)
 # ---------------------------------------------------------------------------
 95 = 0.05
 90 = 0.10
@@ -56,7 +60,7 @@ avg_base_load_w    = 200    # the average base load of your household (W)
 [eod_charge_taper]
 # Optional taper applied during end-of-day full charge (end_of_day_full_charge = true).
 # Same format as [charge_taper].  Unlike [charge_taper] the upper SOC cap is
-# never applied here — charging always continues toward 100%.
+# never applied here - charging always continues toward 100%.
 # Leave empty to lift all limits (original behaviour).
 # ---------------------------------------------------------------------------
 # 99 = 0.10
@@ -71,10 +75,14 @@ lead_time_minutes = 120   # switch to full-charge mode this many minutes before
 # ---------------------------------------------------------------------------
 [grid_export]
 # ---------------------------------------------------------------------------
-reserve_soc        = 12    # minimum SoC (%) to keep at sunrise; covers morning
-                           # consumption (breakfast etc.) until PV production
-                           # takes over — 12% ≈ 0.9 kWh on a 7.7 kWh battery
-min_discharge_rate_w = 300 # lower bound for the computed discharge rate (W)
+reserve_soc          = 12    # minimum SoC (%) to keep at sunrise; covers morning
+                             # consumption (breakfast etc.) until PV production
+                             # takes over - 12% ~= 0.9 kWh on a 7.7 kWh battery
+min_discharge_rate_w = 300   # lower bound for the computed discharge rate (W)
+extend_hours         = 0     # 0 = off, or float hours, or "auto" (compute from forecast)
+                             # extends the discharge horizon so the rate is computed over
+                             # a longer window (battery discharges slower, arrives at
+                             # reserve later - useful when solar ramps up slowly)
 
 # ---------------------------------------------------------------------------
 [battery]
@@ -96,10 +104,10 @@ timezone  =           # IANA timezone name, e.g. Europe/Vienna
 # ---------------------------------------------------------------------------
 [weather]
 # Required by weather_aware = true.
-# Uses Open-Meteo (https://open-meteo.com) — free, no API key needed.
+# Uses Open-Meteo (https://open-meteo.com) - free, no API key needed.
 #
 # Expected production is estimated as:
-#   kWh/m²/day (from forecast) × pv_peak_kwp × performance_ratio
+#   kWh/m2/day (from forecast) x pv_peak_kwp x performance_ratio
 #
 # If tomorrow's expected production < skip_export_below_kwh, grid export
 # is skipped and the battery is kept for next-day home consumption.
@@ -113,6 +121,24 @@ performance_ratio     = 0.75   # system efficiency factor (losses, wiring, etc.)
 skip_export_below_kwh = 10     # don't export if tomorrow's forecast is below this
 refresh_hours         = 6      # re-fetch forecast if cache is older than this
 cache_path            = /tmp/batctl_weather_cache.json
+
+# ---------------------------------------------------------------------------
+[statefile]
+# Optional state file to reduce Modbus write frequency.
+# When enabled, batctl skips writing to the inverter if the computed setpoint
+# matches what was last written within the current clock-hour.
+# ---------------------------------------------------------------------------
+enabled = false
+path    = /tmp/batctl_state.json
+
+# ---------------------------------------------------------------------------
+[charge_windows]
+# Time windows during which charging is allowed (charge_windows = true in [features]).
+# Format:  name = HH:MM-HH:MM   (local time; midnight-crossing windows supported)
+# Outside all windows, charging is throttled to min_charge_rate_w.
+# ---------------------------------------------------------------------------
+# midday = 10:00-15:00
+# night  = 22:00-06:00
 
 # ---------------------------------------------------------------------------
 [detected]

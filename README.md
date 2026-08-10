@@ -2,7 +2,7 @@
 
 Battery charge and discharge controller for the **Fronius Gen24 / Primo / Symo** inverter series with an attached storage battery (e.g. BYD HVS).
 
-batctl runs as a periodic cron or systemd job (eg. every 5 minutes) and communicates with the inverter over **Modbus TCP** using the **SunSpec** protocol. It covers four distinct modes of operation, all individually configurable and guarded by feature flags.
+batctl runs as a periodic cron or systemd job (eg. every 5 minutes) and communicates with the inverter over **Modbus TCP** using the **SunSpec** protocol. All modes of operation are individually configurable and guarded by feature flags.
 
 ---
 
@@ -31,6 +31,36 @@ The sunrise reserve is intended to cover morning consumption (e.g. breakfast) un
 ### Weather-aware export (`weather_aware`)
 
 If tomorrow's solar production forecast is below a configurable threshold, the night export is skipped and the battery is kept for next-day home use. Uses [Open-Meteo](https://open-meteo.com) (free, no API key needed). If the forecast fetch fails, batctl falls back to exporting (fail-open).
+
+### Discharge horizon extension (`extend_hours`)
+
+Softens the overnight discharge curve by pretending the battery has more time to drain than it actually does. The discharge rate is calculated against `hours_until_sunrise + extend_hours`, so the battery arrives at sunrise with more charge remaining to cover morning household loads while solar ramps up.
+
+Set `extend_hours` to a fixed number of hours or to `auto`. In auto mode batctl reads tomorrow's hourly forecast and computes how many hours after sunrise PV output is expected to exceed `avg_base_load_w`, then uses that as the extension.
+
+### Charge windows (`charge_windows`)
+
+Restrict battery charging to named time windows. Outside all configured windows, charging is throttled to `min_charge_rate_w` (set it to `0` to block charging entirely). Midnight-crossing windows (e.g. `22:00-06:00`) are supported. Useful for keeping charging capacity free in the afternoon so the end-of-day top-up has headroom, or for avoiding grid draw during expensive tariff periods.
+
+```ini
+[features]
+charge_windows = true
+
+[charge_windows]
+midday = 10:00-15:00
+```
+
+### Charging profiles (`profile`)
+
+Automatically shapes the charge rate ceiling across the day based on the hourly solar forecast. The plan is generated once per day from the cached forecast and stored in the state file.
+
+| Profile | Behaviour |
+|---|---|
+| `solar_follow` | Charge rate proportional to forecast power at each hour. Peaks at solar noon, low in early morning and late afternoon. Naturally concentrates charging around midday. |
+| `ramp_up` | Proportional to solar through the morning ascent, then holds at 100 % after the daily peak. Battery charges gently while solar rises, then as fast as possible in the afternoon. |
+| `spread` | Uniform 100 % ceiling across all daylight hours. Acts as a time gate (sunrise to sunset only) without adding a rate ceiling; charge taper and `charge_limit` still govern the actual rate. |
+
+The profile ceiling is applied in addition to existing taper rules and the `charge_limit` cap. Requires `[weather] pv_peak_kwp > 0` and `[location] timezone`.
 
 ---
 
@@ -140,20 +170,29 @@ Key settings:
 | `features` | `end_of_day_full_charge` | `false` | Lift cap near sunset |
 | `features` | `night_grid_export` | `false` | Discharge to grid overnight |
 | `features` | `weather_aware` | `false` | Skip export on cloudy forecast |
+| `features` | `charge_windows` | `false` | Restrict charging to time windows |
 | `charging` | `upper_soc_limit` | `80` | Day-time SoC cap (%) |
+| `charging` | `avg_base_load_w` | `200` | Average household base load (W); added to night discharge rate |
+| `charging` | `profile` | `none` | Charging profile: `none`, `solar_follow`, `spread`, `ramp_up` |
 | `grid_export` | `reserve_soc` | `12` | Minimum SoC at sunrise (%) |
+| `grid_export` | `extend_hours` | `0` | Extra hours added to discharge horizon (`0`, float, or `auto`) |
 | `end_of_day` | `lead_time_minutes` | `120` | Minutes before sunset to lift cap |
 | `battery` | `capacity_kwh` | auto via `detect` | Battery energy capacity (kWh) |
-| `weather` | `pv_peak_kwp` | *(required for weather_aware)* | Installed PV peak power (kWp) |
+| `weather` | `pv_peak_kwp` | *(required for weather_aware/profile)* | Installed PV peak power (kWp) |
 | `weather` | `skip_export_below_kwh` | `10` | Forecast threshold to skip export |
 | `weather` | `cache_path` | `/tmp/batctl_weather_cache.json` | Weather cache location |
+| `statefile` | `enabled` | `false` | Enable state file to reduce Modbus writes |
+| `statefile` | `path` | `/tmp/batctl_state.json` | State file location |
 
 ### Feature dependencies (enforced at startup)
 
 ```
-end_of_day_full_charge  →  charge_limit AND [location]
-night_grid_export       →  [location] AND [battery] capacity_kwh > 0
-weather_aware           →  night_grid_export AND [weather] pv_peak_kwp > 0
+end_of_day_full_charge  ->  charge_limit AND [location]
+night_grid_export       ->  [location] AND [battery] capacity_kwh > 0
+weather_aware           ->  night_grid_export AND [weather] pv_peak_kwp > 0
+charge_windows          ->  [location] timezone AND at least one window in [charge_windows]
+charging profile        ->  [location] timezone AND [weather] pv_peak_kwp > 0
+extend_hours = auto     ->  [weather] pv_peak_kwp > 0 (uses hourly forecast)
 ```
 
 A misconfigured combination exits immediately with a clear error message.
@@ -162,7 +201,12 @@ A misconfigured combination exits immediately with a clear error message.
 
 ## Weather cache
 
-The forecast is cached in `[weather] cache_path` (default `/tmp/batctl_weather_cache.json`) so that the network is only hit a few times per day rather than every cron run. The cache is automatically invalidated when:
+The forecast is cached in `[weather] cache_path` (default `/tmp/batctl_weather_cache.json`) so that the network is only hit a few times per day rather than every cron run. The cache stores:
+
+- **Daily radiation sum** (MJ/m^2) for tomorrow -- used by `weather_aware` to decide whether to skip export
+- **Hourly radiation** (W/m^2) for today and tomorrow -- used by charging profiles and `extend_hours = auto`
+
+The cache is automatically invalidated when:
 
 - It is older than `[weather] refresh_hours` (default 6 hours)
 - It is for the wrong date
@@ -174,6 +218,27 @@ python batctl.py forecast --config batctl.conf
 ```
 
 If you change the `[location]` settings, the old cache will be ignored automatically on the next run.
+
+---
+
+## State file
+
+When `[statefile] enabled = true`, batctl writes the last-applied inverter setpoint (StorCtl_Mod, InWRte, OutWRte) to a JSON file after each successful Modbus write. On subsequent cron runs it skips the write entirely if:
+
+- The computed setpoint is identical to the last-written one, **and**
+- The last write was within the current clock-hour
+
+This reduces the number of Modbus round-trips from one every 5 minutes to at most one per hour under stable conditions (e.g. during a long night export at a fixed rate).
+
+The state file also caches the daily charging plan so it is not regenerated on every cron run.
+
+```ini
+[statefile]
+enabled = true
+path    = /tmp/batctl_state.json
+```
+
+State file writes are always skipped in `--dry-run` mode.
 
 ---
 
