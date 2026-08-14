@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>batctl</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1a1a2e;
+    color: #c9d1d9;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+  }
+  header {
+    background: #16213e;
+    border-bottom: 1px solid #0f3460;
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  header h1 { font-size: 20px; color: #e94560; letter-spacing: 1px; }
+  header span { color: #8b949e; font-size: 12px; }
+  .tabs {
+    display: flex;
+    background: #16213e;
+    border-bottom: 1px solid #0f3460;
+    padding: 0 20px;
+  }
+  .tab-btn {
+    padding: 10px 20px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #8b949e;
+    cursor: pointer;
+    font-size: 14px;
+    transition: color 0.2s, border-color 0.2s;
+  }
+  .tab-btn.active { color: #e94560; border-bottom-color: #e94560; }
+  .tab-btn:hover:not(.active) { color: #c9d1d9; }
+  .tab-panel { display: none; padding: 20px; }
+  .tab-panel.active { display: block; }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    padding: 18px;
+  }
+  .card h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #8b949e;
+    margin-bottom: 14px;
+    border-bottom: 1px solid #0f3460;
+    padding-bottom: 8px;
+  }
+  .big-month {
+    font-size: 36px;
+    font-weight: bold;
+    color: #e94560;
+    line-height: 1;
+    margin-bottom: 4px;
+  }
+  .big-month-name {
+    font-size: 14px;
+    color: #8b949e;
+    margin-bottom: 12px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .badge-run { background: #0f3460; color: #58a6ff; }
+  .badge-restore { background: #2d1b4e; color: #bc8cff; }
+  .badge-inactive { background: #21262d; color: #8b949e; }
+  .kv { margin-bottom: 8px; }
+  .kv .label { color: #8b949e; font-size: 12px; margin-bottom: 2px; }
+  .kv .value { color: #c9d1d9; }
+  .null-state { color: #8b949e; font-style: italic; }
+  .bar-wrap { background: #0f3460; border-radius: 4px; height: 8px; margin-top: 4px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
+  .bar-green { background: #3fb950; }
+  .bar-amber { background: #d29922; }
+  .bar-red { background: #e94560; }
+  .hour-grid {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 2px;
+    margin-top: 10px;
+  }
+  .hour-cell {
+    height: 20px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    color: rgba(255,255,255,0.5);
+    transition: background 0.3s;
+  }
+  .hour-cell.current-hour {
+    outline: 2px solid #e94560;
+    outline-offset: -1px;
+  }
+  .config-panels {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+  @media (max-width: 700px) {
+    .config-panels { grid-template-columns: 1fr; }
+  }
+  .file-list {
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .file-list-header {
+    padding: 10px 14px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #8b949e;
+    border-bottom: 1px solid #0f3460;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .file-item {
+    padding: 10px 14px;
+    cursor: pointer;
+    border-bottom: 1px solid #0f3460;
+    transition: background 0.1s;
+  }
+  .file-item:last-child { border-bottom: none; }
+  .file-item:hover { background: #0f3460; }
+  .file-item.selected { background: #0f3460; border-left: 3px solid #e94560; }
+  .file-item .file-name { color: #58a6ff; font-family: monospace; font-size: 13px; }
+  .file-item .file-meta { color: #8b949e; font-size: 11px; margin-top: 2px; }
+  .editor-panel {
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .editor-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+  .editor-filename {
+    background: #1a1a2e;
+    border: 1px solid #0f3460;
+    color: #c9d1d9;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 13px;
+    flex: 1;
+    min-width: 160px;
+  }
+  .editor-toolbar { display: flex; gap: 8px; }
+  .btn {
+    padding: 5px 14px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: bold;
+    transition: opacity 0.2s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn-primary { background: #0f3460; color: #58a6ff; }
+  .btn-danger { background: #3d1a1a; color: #e94560; }
+  .btn-secondary { background: #21262d; color: #8b949e; }
+  .btn-accent { background: #e94560; color: #fff; }
+  .editor-textarea {
+    width: 100%;
+    min-height: 400px;
+    background: #1a1a2e;
+    border: 1px solid #0f3460;
+    color: #c9d1d9;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 13px;
+    padding: 12px;
+    border-radius: 4px;
+    resize: vertical;
+    line-height: 1.5;
+  }
+  .status-msg {
+    margin-top: 8px;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    display: none;
+  }
+  .status-msg.ok { background: #1a2e1a; color: #3fb950; display: block; }
+  .status-msg.err { background: #2e1a1a; color: #e94560; display: block; }
+  .schedule-section {
+    margin-top: 20px;
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    padding: 18px;
+  }
+  .schedule-section h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #8b949e;
+    margin-bottom: 14px;
+    border-bottom: 1px solid #0f3460;
+    padding-bottom: 8px;
+  }
+  .month-strip {
+    display: grid;
+    grid-template-columns: repeat(12, 1fr);
+    gap: 4px;
+    margin-bottom: 18px;
+  }
+  .month-cell {
+    height: 32px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: bold;
+    background: #21262d;
+    color: #8b949e;
+    transition: background 0.3s;
+  }
+  .month-cell.current {
+    animation: pulse-outline 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse-outline {
+    0%, 100% { outline: 2px solid rgba(233,69,96,0.4); outline-offset: -2px; }
+    50% { outline: 2px solid rgba(233,69,96,1); outline-offset: -2px; }
+  }
+  .entry-table { width: 100%; border-collapse: collapse; }
+  .entry-table th {
+    text-align: left;
+    padding: 6px 8px;
+    font-size: 11px;
+    color: #8b949e;
+    border-bottom: 1px solid #0f3460;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .entry-table td { padding: 8px 4px; vertical-align: top; }
+  .month-checks { display: flex; flex-wrap: wrap; gap: 3px; }
+  .month-check { display: flex; align-items: center; gap: 2px; font-size: 11px; white-space: nowrap; }
+  .month-check input[type=checkbox] { cursor: pointer; }
+  .month-check.conflict label { color: #e94560; }
+  select.entry-select {
+    background: #1a1a2e;
+    border: 1px solid #0f3460;
+    color: #c9d1d9;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    width: 100%;
+  }
+  .sched-actions {
+    margin-top: 14px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .sched-status {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    display: none;
+  }
+  .sched-status.ok { background: #1a2e1a; color: #3fb950; display: inline-block; }
+  .sched-status.err { background: #2e1a1a; color: #e94560; display: inline-block; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>batctl</h1>
+  <span>Fronius inverter battery controller</span>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" onclick="showTab(event, 'dashboard')">Dashboard</button>
+  <button class="tab-btn" onclick="showTab(event, 'config')">Configuration</button>
+</nav>
+
+<div id="tab-dashboard" class="tab-panel active">
+  <div class="cards">
+    <div class="card" id="card-schedule">
+      <h2>Active Schedule</h2>
+      <div id="sched-content"><span class="null-state">Loading...</span></div>
+    </div>
+    <div class="card" id="card-state">
+      <h2>Inverter State</h2>
+      <div id="state-content"><span class="null-state">Loading...</span></div>
+    </div>
+    <div class="card" id="card-weather">
+      <h2>Weather Forecast</h2>
+      <div id="weather-content"><span class="null-state">Loading...</span></div>
+    </div>
+    <div class="card" id="card-plan">
+      <h2>Charging Plan</h2>
+      <div id="plan-content"><span class="null-state">Loading...</span></div>
+    </div>
+  </div>
+</div>
+
+<div id="tab-config" class="tab-panel">
+  <div class="config-panels">
+    <div class="file-list">
+      <div class="file-list-header">
+        <span>Config Files</span>
+        <button class="btn btn-secondary" onclick="newConfig()" style="font-size:11px;padding:3px 10px;">+ New</button>
+      </div>
+      <div id="file-list-body"></div>
+    </div>
+    <div class="editor-panel">
+      <div class="editor-header">
+        <input type="text" class="editor-filename" id="editor-filename" placeholder="filename.conf" />
+        <div class="editor-toolbar">
+          <button class="btn btn-primary" onclick="saveConfig()">Save</button>
+          <button class="btn btn-danger" onclick="deleteConfig()">Delete</button>
+          <button class="btn btn-secondary" onclick="reloadConfig()">Reload</button>
+        </div>
+      </div>
+      <textarea class="editor-textarea" id="editor-textarea" placeholder="Select a config file or create a new one..."></textarea>
+      <div class="status-msg" id="editor-status"></div>
+    </div>
+  </div>
+
+  <div class="schedule-section">
+    <h2>Schedule</h2>
+    <div class="month-strip" id="month-strip"></div>
+    <table class="entry-table" id="entry-table">
+      <thead>
+        <tr>
+          <th>Months</th>
+          <th>Config File</th>
+          <th>Mode</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="entry-tbody"></tbody>
+    </table>
+    <div class="sched-actions">
+      <button class="btn btn-secondary" onclick="addEntry()">+ Add entry</button>
+      <button class="btn btn-accent" onclick="saveSchedule()">Save schedule</button>
+      <span class="sched-status" id="sched-status"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const MONTH_COLORS = [
+  '#0f3460','#1a4870','#0d5c63','#156b4a','#1a6b3c','#2d6a2d',
+  '#4a6b1a','#6b5a1a','#6b3a1a','#5a1a4a','#3a1a6b','#1a1a6b'
+];
+
+let currentFile = null;
+let configFiles = [];
+let scheduleEntries = [];
+
+async function showTab(event, name) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+  if (name === 'config') {
+    await loadConfigList();   // must complete first so configFiles is populated
+    await loadSchedule();     // renderEntryTable reads configFiles for dropdowns
+  }
+}
+
+async function fetchJSON(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(r.statusText);
+  return r.json();
+}
+
+// ---- Dashboard ----
+
+async function loadDashboard() {
+  try {
+    const s = await fetchJSON('/api/status');
+    renderScheduleCard(s);
+    renderStateCard(s);
+    renderWeatherCard(s);
+    renderPlanCard(s);
+  } catch(e) {
+    console.error('Dashboard load error', e);
+  }
+}
+
+function renderScheduleCard(s) {
+  const el = document.getElementById('sched-content');
+  const month = s.current_month;
+  const name = MONTH_NAMES[month - 1];
+  const entry = s.active_entry;
+  let badge = '';
+  if (!entry) {
+    badge = '<span class="badge badge-inactive">Not scheduled</span>';
+  } else if (entry.mode === 'run') {
+    badge = '<span class="badge badge-run">Run</span>';
+  } else {
+    badge = '<span class="badge badge-restore">Restore once</span>';
+  }
+  el.innerHTML = `
+    <div class="big-month">${month}</div>
+    <div class="big-month-name">${name}</div>
+    ${entry ? `<div class="kv"><div class="label">Config</div><div class="value" style="font-family:monospace">${entry.config}</div></div>` : ''}
+    <div style="margin-top:8px">${badge}</div>
+  `;
+}
+
+function renderStateCard(s) {
+  const el = document.getElementById('state-content');
+  const st = s.state;
+  if (!st || !st.setpoint) { el.innerHTML = '<span class="null-state">No state data</span>'; return; }
+  const sp = st.setpoint;
+  const ts = sp.written_at ? new Date(sp.written_at).toLocaleString() : 'unknown';
+  const storModes = {0:'Off', 1:'Charge limited', 2:'Discharging'};
+  const storVal = sp.storctl_mod !== undefined ? (storModes[sp.storctl_mod] || sp.storctl_mod) : '-';
+  const inw = sp.inw_rte !== undefined ? sp.inw_rte + ' %' : '-';
+  const outw = sp.out_w_rte !== undefined ? sp.out_w_rte + ' %' : '-';
+  el.innerHTML = `
+    <div class="kv"><div class="label">Last written</div><div class="value">${ts}</div></div>
+    <div class="kv"><div class="label">StorCtl_Mod</div><div class="value">${storVal}</div></div>
+    <div class="kv"><div class="label">Charge rate (InWRte)</div><div class="value">${inw}</div></div>
+    <div class="kv"><div class="label">Discharge rate (OutWRte)</div><div class="value">${outw}</div></div>
+  `;
+}
+
+function renderWeatherCard(s) {
+  const el = document.getElementById('weather-content');
+  const w = s.weather;
+  if (!w) { el.innerHTML = '<span class="null-state">No forecast data</span>'; return; }
+  const lat = w.latitude !== undefined ? w.latitude : '-';
+  const lon = w.longitude !== undefined ? w.longitude : '-';
+  const fetched = w.fetched_at ? new Date(w.fetched_at).toLocaleString() : 'unknown';
+  const kwh = w.expected_kwh !== undefined ? w.expected_kwh : null;
+  const threshold = w.skip_export_below_kwh !== undefined ? w.skip_export_below_kwh : 10;
+  let barHtml = '';
+  if (kwh !== null) {
+    const maxKwh = Math.max(kwh * 1.5, threshold * 1.5, 1);
+    const pct = Math.min(100, Math.round(kwh / maxKwh * 100));
+    let cls = kwh >= threshold ? 'bar-green' : kwh >= threshold * 0.5 ? 'bar-amber' : 'bar-red';
+    barHtml = `
+      <div class="kv">
+        <div class="label">Tomorrow expected</div>
+        <div class="value">${kwh.toFixed(1)} kWh</div>
+        <div class="bar-wrap"><div class="bar-fill ${cls}" style="width:${pct}%"></div></div>
+      </div>`;
+  }
+  el.innerHTML = `
+    <div class="kv"><div class="label">Location</div><div class="value">${lat}, ${lon}</div></div>
+    <div class="kv"><div class="label">Last fetched</div><div class="value">${fetched}</div></div>
+    ${barHtml || '<div class="kv"><span class="null-state">No forecast kWh data</span></div>'}
+  `;
+}
+
+function renderPlanCard(s) {
+  const el = document.getElementById('plan-content');
+  const st = s.state;
+  const plan = st && st.charging_plan ? st.charging_plan : null;
+  if (!plan) { el.innerHTML = '<span class="null-state">No plan</span>'; return; }
+  const profile = plan.profile || 'unknown';
+  const rates = plan.rates || {};
+  const now = new Date();
+  const currentHour = now.getHours();
+  let cells = '';
+  for (let h = 0; h < 24; h++) {
+    const rate = rates[String(h)] !== undefined ? rates[String(h)] : 0;
+    const alpha = Math.max(0.05, rate / 100);
+    const bg = `rgba(233,69,96,${alpha.toFixed(2)})`;
+    const cur = h === currentHour ? 'current-hour' : '';
+    cells += `<div class="hour-cell ${cur}" style="background:${bg}" title="${h}:00 - ${rate}%">${h}</div>`;
+  }
+  el.innerHTML = `
+    <div style="margin-bottom:8px"><span class="badge badge-run">${profile}</span></div>
+    <div class="hour-grid">${cells}</div>
+  `;
+}
+
+// ---- Config tab ----
+
+async function loadConfigList() {
+  try {
+    configFiles = await fetchJSON('/api/configs');
+    const body = document.getElementById('file-list-body');
+    body.innerHTML = '';
+    if (configFiles.length === 0) {
+      body.innerHTML = '<div style="padding:14px;color:#8b949e;font-size:12px">No config files</div>';
+      return;
+    }
+    configFiles.forEach(f => {
+      const div = document.createElement('div');
+      div.className = 'file-item' + (f.name === currentFile ? ' selected' : '');
+      div.dataset.name = f.name;
+      const d = new Date(f.modified_iso);
+      div.innerHTML = `<div class="file-name">${f.name}</div><div class="file-meta">${d.toLocaleString()}</div>`;
+      div.onclick = () => openConfig(f.name);
+      body.appendChild(div);
+    });
+  } catch(e) {
+    console.error('Config list error', e);
+  }
+}
+
+async function openConfig(name) {
+  try {
+    const data = await fetchJSON('/api/configs/' + encodeURIComponent(name));
+    currentFile = name;
+    document.getElementById('editor-filename').value = name;
+    document.getElementById('editor-textarea').value = data.content;
+    clearEditorStatus();
+    document.querySelectorAll('.file-item').forEach(el => {
+      el.classList.toggle('selected', el.dataset.name === name);
+    });
+  } catch(e) {
+    showEditorStatus('Failed to load: ' + e.message, false);
+  }
+}
+
+async function newConfig() {
+  const name = prompt('New config filename (without .conf):');
+  if (!name) return;
+  const filename = name.endsWith('.conf') ? name : name + '.conf';
+  try {
+    const data = await fetchJSON('/api/example');
+    currentFile = null;
+    document.getElementById('editor-filename').value = filename;
+    document.getElementById('editor-textarea').value = data.content;
+    clearEditorStatus();
+    document.querySelectorAll('.file-item').forEach(el => el.classList.remove('selected'));
+  } catch(e) {
+    showEditorStatus('Failed to load template: ' + e.message, false);
+  }
+}
+
+async function saveConfig() {
+  const filename = document.getElementById('editor-filename').value.trim();
+  if (!filename) { showEditorStatus('Enter a filename', false); return; }
+  const content = document.getElementById('editor-textarea').value;
+  try {
+    await fetchJSON('/api/configs/' + encodeURIComponent(filename), {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({content})
+    });
+    currentFile = filename;
+    showEditorStatus('Saved', true);
+    await loadConfigList();
+    refreshScheduleConfigDropdowns();
+  } catch(e) {
+    showEditorStatus('Save failed: ' + e.message, false);
+  }
+}
+
+async function deleteConfig() {
+  const filename = document.getElementById('editor-filename').value.trim() || currentFile;
+  if (!filename) return;
+  if (!confirm('Delete ' + filename + '?')) return;
+  try {
+    await fetchJSON('/api/configs/' + encodeURIComponent(filename), {method: 'DELETE'});
+    currentFile = null;
+    document.getElementById('editor-filename').value = '';
+    document.getElementById('editor-textarea').value = '';
+    clearEditorStatus();
+    await loadConfigList();
+    refreshScheduleConfigDropdowns();
+  } catch(e) {
+    showEditorStatus('Delete failed: ' + e.message, false);
+  }
+}
+
+async function reloadConfig() {
+  const filename = currentFile || document.getElementById('editor-filename').value.trim();
+  if (!filename) return;
+  await openConfig(filename);
+}
+
+function showEditorStatus(msg, ok) {
+  const el = document.getElementById('editor-status');
+  el.textContent = msg;
+  el.className = 'status-msg ' + (ok ? 'ok' : 'err');
+}
+function clearEditorStatus() {
+  const el = document.getElementById('editor-status');
+  el.className = 'status-msg';
+  el.textContent = '';
+}
+
+// ---- Schedule ----
+
+async function loadSchedule() {
+  try {
+    const data = await fetchJSON('/api/schedule');
+    scheduleEntries = (data.entries || []).map(e => ({...e, months: [...(e.months || [])]}));
+    renderMonthStrip();
+    renderEntryTable();
+  } catch(e) {
+    console.error('Schedule load error', e);
+  }
+}
+
+function entryColorForMonth(m) {
+  for (let i = 0; i < scheduleEntries.length; i++) {
+    if (scheduleEntries[i].months && scheduleEntries[i].months.includes(m)) {
+      return MONTH_COLORS[i % MONTH_COLORS.length];
+    }
+  }
+  return '#21262d';
+}
+
+function renderMonthStrip() {
+  const now = new Date();
+  const curMonth = now.getMonth() + 1;
+  const strip = document.getElementById('month-strip');
+  strip.innerHTML = '';
+  for (let m = 1; m <= 12; m++) {
+    const div = document.createElement('div');
+    div.className = 'month-cell' + (m === curMonth ? ' current' : '');
+    div.style.background = entryColorForMonth(m);
+    div.style.color = '#fff';
+    div.textContent = MONTH_NAMES[m - 1];
+    strip.appendChild(div);
+  }
+}
+
+function conflictMonths() {
+  const seen = {};
+  scheduleEntries.forEach((e, i) => {
+    (e.months || []).forEach(m => {
+      if (seen[m] !== undefined) {
+        seen[m] = -1;
+      } else {
+        seen[m] = i;
+      }
+    });
+  });
+  const conflicts = new Set();
+  Object.entries(seen).forEach(([m, i]) => { if (i === -1) conflicts.add(parseInt(m, 10)); });
+  return conflicts;
+}
+
+function renderEntryTable() {
+  const tbody = document.getElementById('entry-tbody');
+  tbody.innerHTML = '';
+  const conflicts = conflictMonths();
+
+  scheduleEntries.forEach((entry, idx) => {
+    const tr = document.createElement('tr');
+
+    // Month checkboxes
+    const tdMonths = document.createElement('td');
+    const wrap = document.createElement('div');
+    wrap.className = 'month-checks';
+    for (let m = 1; m <= 12; m++) {
+      const label = document.createElement('span');
+      label.className = 'month-check' + (conflicts.has(m) && (entry.months || []).includes(m) ? ' conflict' : '');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = (entry.months || []).includes(m);
+      cb.dataset.month = m;
+      cb.onchange = () => {
+        if (cb.checked) {
+          if (!scheduleEntries[idx].months.includes(m)) scheduleEntries[idx].months.push(m);
+        } else {
+          scheduleEntries[idx].months = scheduleEntries[idx].months.filter(x => x !== m);
+        }
+        renderMonthStrip();
+        renderEntryTable();
+      };
+      const lbl = document.createElement('label');
+      lbl.textContent = MONTH_NAMES[m - 1].slice(0, 1) + (m < 10 ? m : m);
+      lbl.style.cursor = 'pointer';
+      lbl.onclick = () => { cb.checked = !cb.checked; cb.onchange(); };
+      label.appendChild(cb);
+      label.appendChild(lbl);
+      wrap.appendChild(label);
+    }
+    tdMonths.appendChild(wrap);
+    tr.appendChild(tdMonths);
+
+    // Config dropdown
+    const tdConfig = document.createElement('td');
+    const sel = document.createElement('select');
+    sel.className = 'entry-select';
+    const blankOpt = document.createElement('option');
+    blankOpt.value = '';
+    blankOpt.textContent = '-- select --';
+    sel.appendChild(blankOpt);
+    configFiles.forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f.name;
+      opt.textContent = f.name;
+      if (f.name === entry.config) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    if (entry.config && !configFiles.find(f => f.name === entry.config)) {
+      const opt = document.createElement('option');
+      opt.value = entry.config;
+      opt.textContent = entry.config + ' (missing)';
+      opt.selected = true;
+      sel.appendChild(opt);
+    }
+    sel.onchange = () => { scheduleEntries[idx].config = sel.value; };
+    tdConfig.appendChild(sel);
+    tr.appendChild(tdConfig);
+
+    // Mode dropdown
+    const tdMode = document.createElement('td');
+    const msel = document.createElement('select');
+    msel.className = 'entry-select';
+    [['run','Run'],['restore_once','Restore once']].forEach(([v,t]) => {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = t;
+      if (v === entry.mode) opt.selected = true;
+      msel.appendChild(opt);
+    });
+    msel.onchange = () => { scheduleEntries[idx].mode = msel.value; };
+    tdMode.appendChild(msel);
+    tr.appendChild(tdMode);
+
+    // Delete button
+    const tdDel = document.createElement('td');
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-danger';
+    btn.textContent = 'x';
+    btn.style.padding = '3px 10px';
+    btn.onclick = () => {
+      scheduleEntries.splice(idx, 1);
+      renderMonthStrip();
+      renderEntryTable();
+    };
+    tdDel.appendChild(btn);
+    tr.appendChild(tdDel);
+
+    tbody.appendChild(tr);
+  });
+}
+
+function addEntry() {
+  scheduleEntries.push({months: [], config: '', mode: 'run'});
+  renderEntryTable();
+}
+
+function refreshScheduleConfigDropdowns() {
+  renderEntryTable();
+}
+
+async function saveSchedule() {
+  const statusEl = document.getElementById('sched-status');
+  const payload = {entries: scheduleEntries.map(e => ({
+    months: [...e.months].sort((a,b) => a-b),
+    config: e.config,
+    mode: e.mode
+  }))};
+  try {
+    await fetchJSON('/api/schedule', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    statusEl.textContent = 'Saved';
+    statusEl.className = 'sched-status ok';
+    renderMonthStrip();
+    setTimeout(() => { statusEl.className = 'sched-status'; }, 3000);
+  } catch(e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.className = 'sched-status err';
+  }
+}
+
+// ---- Init ----
+
+loadDashboard();
+setInterval(loadDashboard, 60000);
+</script>
+</body>
+</html>

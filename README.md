@@ -244,6 +244,119 @@ State file writes are always skipped in `--dry-run` mode.
 
 ## Scheduling
 
+### Docker
+
+A single Debian-based image covers all supported platforms:
+
+| Platform | Device |
+|---|---|
+| `linux/arm/v6` | Raspberry Pi Zero W (original) |
+| `linux/arm/v7` | Raspberry Pi 2, Pi 3 (32-bit OS), Pi 4 (32-bit OS) |
+| `linux/arm64` | Raspberry Pi 3/4/5, Pi Zero 2 W (64-bit OS) |
+| `linux/amd64` | x86-64 |
+
+**Requirements:** Docker Engine 20.10+ and (for cross-compilation only) `docker buildx` with QEMU binfmt support.
+
+**Quick start:**
+
+```sh
+mkdir config
+cp batctl.conf.example config/batctl.conf
+# Fill in [connection], [location], [features] etc.
+# If using the state file and weather cache, point them at the shared data volume:
+#   [weather]   cache_path = /var/lib/batctl/weather_cache.json
+#   [statefile] enabled = true
+#               path    = /var/lib/batctl/state.json
+docker compose up -d --build
+docker logs -f batctl
+```
+
+All `.conf` files go in `./config/`. This directory is shared between the controller and the web UI; both containers mount it at `/config`.
+
+**One-off commands** (detect, dry-run, forecast):
+
+```sh
+docker run --rm --network host \
+  -v ./config:/config \
+  batctl detect --config /config/batctl.conf
+
+docker run --rm --network host \
+  -v ./config:/config \
+  batctl run --config /config/batctl.conf --dry-run
+```
+
+**Cross-compiling from an x86 machine** (build once, deploy to Pi):
+
+```sh
+# Install QEMU binfmt support (one-time, on the build machine)
+docker run --privileged --rm tonistiigi/binfmt --install all
+
+# Build for a specific platform and load into local Docker
+docker buildx build --platform linux/arm/v6  -t batctl --load .   # Pi Zero W
+docker buildx build --platform linux/arm/v7  -t batctl --load .   # Pi 3/4 (32-bit)
+docker buildx build --platform linux/arm64   -t batctl --load .   # Pi 4/5 (64-bit)
+
+# Save and copy to the Pi
+docker save batctl | ssh pi@raspberrypi.local docker load
+
+# Build and push a multi-arch manifest to a registry in one step
+docker buildx build \
+  --platform linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64 \
+  -t youruser/batctl:latest --push .
+```
+
+**Network mode:** both containers use `network_mode: host`. The controller reaches the inverter via Modbus TCP without port-mapping; the web UI is available at `http://<pi-hostname>:8080` on the local network.
+
+**Logs:** cron output is forwarded to the Docker log driver:
+
+```sh
+docker logs -f batctl      # controller
+docker logs -f batctl-web  # web UI
+```
+
+**Config changes:** edit files in `./config/` on the host, then restart the controller:
+
+```sh
+docker compose restart batctl
+```
+
+### Web UI
+
+A browser-based interface is included as a second Docker service (`batctl-web`). It starts automatically with `docker compose up` and is reachable at `http://<pi-hostname>:8080`.
+
+**Dashboard tab** — refreshes every 60 seconds:
+- Active schedule entry for the current month (config file, run / restore-once mode)
+- Last inverter setpoint written via Modbus (StorCtl_Mod, InWRte, OutWRte)
+- Tomorrow's solar forecast with a colour-coded bar (green / amber / red relative to the export threshold)
+- Hourly charging plan grid shaded by rate percentage, current hour outlined
+
+**Configuration tab:**
+- File list of all `.conf` files in `./config/` with timestamps
+- Monospace editor — create, edit, save, and delete config files
+- Schedule editor — define which config to use each month and whether to run normally or trigger a one-time restore (see Seasonal schedule below)
+
+### Seasonal schedule
+
+`dispatch.py` sits between cron and `batctl.py`. Cron calls it every 5 minutes; it reads `./config/.schedule.json` and dispatches to the correct config for the current month.
+
+If no schedule file exists, it falls back to `batctl.py run --config /config/batctl.conf` unchanged.
+
+Example `./config/.schedule.json` (edit via the web UI or directly):
+
+```json
+{
+  "entries": [
+    {"months": [5,6,7,8],        "config": "config-summer.conf",  "mode": "run"},
+    {"months": [4,9],             "config": "config-reduced.conf", "mode": "run"},
+    {"months": [1,2,3,10,11,12], "config": "batctl.conf",         "mode": "restore_once"}
+  ]
+}
+```
+
+Modes:
+- `"run"` — calls `batctl.py run --config <file>` every cron tick as normal.
+- `"restore_once"` — calls `batctl.py restore --config <file>` once per calendar month (tracked by a flag file in `/tmp`), then does nothing on subsequent ticks. Guarantees the inverter is reset to an unconstrained state at the start of every inactive month even if the container restarts mid-month.
+
 ### cron
 
 See `scripts/cron/` for a ready-to-use wrapper script and installation instructions.

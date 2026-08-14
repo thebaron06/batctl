@@ -1,0 +1,67 @@
+# batctl Docker Compose
+#
+# Supported on all Raspberry Pi models and x86:
+#   Pi Zero W (original), Pi 2, Pi 3, Pi 4, Pi 5, Pi Zero 2 W, x86_64
+#
+# Quick start:
+#   mkdir config
+#   cp batctl.conf.example config/batctl.conf
+#   # Edit config/batctl.conf ...
+#   docker compose up -d --build
+#
+# The ./config directory is shared between the batctl controller and the web UI.
+# Put all your .conf files there. The web UI reads and writes that directory.
+#
+# Cross-compile from an x86 machine (requires docker buildx and QEMU binfmt):
+#   docker buildx build --platform linux/arm/v6 -t batctl --load .
+#   (copy the image to the Pi, then: docker compose up -d)
+
+services:
+  batctl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: batctl:latest
+    container_name: batctl
+    restart: unless-stopped
+    # host networking gives the container direct access to the inverter
+    # on the local network via Modbus TCP without any port-mapping setup
+    network_mode: host
+    volumes:
+      # Shared config directory: put batctl.conf and any extra configs here.
+      # The web UI also writes to this directory (new configs, schedule).
+      - ./config:/config
+      # Shared data volume: weather cache and state file (visible to both containers).
+      # Update batctl.conf to point here:
+      #   [weather]   cache_path = /var/lib/batctl/weather_cache.json
+      #   [statefile] enabled = true
+      #               path    = /var/lib/batctl/state.json
+      - batctl-data:/var/lib/batctl
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: batctl-web:latest
+    container_name: batctl-web
+    restart: unless-stopped
+    # host networking: web UI is accessible at http://<pi-hostname>:8080
+    network_mode: host
+    volumes:
+      - ./config:/config
+      - batctl-data:/var/lib/batctl
+
+volumes:
+  batctl-data:
+    # By default this is a Docker-managed named volume.
+    # To map it to a specific host directory instead, replace the block above
+    # with the following (uncomment and set 'device' to your preferred path):
+    #
+    #   batctl-data:
+    #     driver: local
+    #     driver_opts:
+    #       type: none
+    #       o: bind
+    #       device: /opt/batctl/data
+    #
+    # Then create the directory first:  sudo mkdir -p /opt/batctl/data

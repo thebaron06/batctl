@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY web/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY web/ ./web/
+COPY batctl.conf.example .
+
+ENV CONFIG_DIR=/config
+ENV STATE_FILE=/var/lib/batctl/state.json
+ENV WEATHER_CACHE=/var/lib/batctl/weather_cache.json
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8080
+
+CMD ["python", "web/server.py"]
