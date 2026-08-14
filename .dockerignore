@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+tests/
+*.md
+feature_plan.md
+gen24-modbus-api-external-docs.zip
+charge_rules.conf
+batctl.conf
+docker-compose.yml
+suns.py
+scripts/
+.claude/

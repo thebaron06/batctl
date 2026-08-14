@@ -244,6 +244,72 @@ State file writes are always skipped in `--dry-run` mode.
 
 ## Scheduling
 
+### Docker
+
+A single Debian-based image covers all supported platforms:
+
+| Platform | Device |
+|---|---|
+| `linux/arm/v6` | Raspberry Pi Zero W (original) |
+| `linux/arm/v7` | Raspberry Pi 2, Pi 3 (32-bit OS), Pi 4 (32-bit OS) |
+| `linux/arm64` | Raspberry Pi 3/4/5, Pi Zero 2 W (64-bit OS) |
+| `linux/amd64` | x86-64 |
+
+**Requirements:** Docker Engine 20.10+ and (for cross-compilation only) `docker buildx` with QEMU binfmt support.
+
+**Quick start:**
+
+```sh
+cp batctl.conf.example batctl.conf
+# Fill in [connection], [location], [features] etc.
+docker compose up -d --build
+docker logs -f batctl
+```
+
+`docker compose up -d --build` builds the image for the current host architecture and starts batctl as a background service that runs every 5 minutes. It restarts automatically on reboot (`restart: unless-stopped`).
+
+**One-off commands** (detect, dry-run, forecast):
+
+```sh
+docker run --rm --network host \
+  -v ./batctl.conf:/config/batctl.conf:ro \
+  batctl detect --config /config/batctl.conf
+
+docker run --rm --network host \
+  -v ./batctl.conf:/config/batctl.conf:ro \
+  batctl run --config /config/batctl.conf --dry-run
+```
+
+**Cross-compiling from an x86 machine** (build once, deploy to Pi):
+
+```sh
+# Install QEMU binfmt support (one-time, on the build machine)
+docker run --privileged --rm tonistiigi/binfmt --install all
+
+# Build for a specific platform and load into local Docker
+docker buildx build --platform linux/arm/v6  -t batctl --load .   # Pi Zero W
+docker buildx build --platform linux/arm/v7  -t batctl --load .   # Pi 3/4 (32-bit)
+docker buildx build --platform linux/arm64   -t batctl --load .   # Pi 4/5 (64-bit)
+
+# Save and copy to the Pi
+docker save batctl | ssh pi@raspberrypi.local docker load
+
+# Build and push a multi-arch manifest to a registry in one step
+docker buildx build \
+  --platform linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64 \
+  -t youruser/batctl:latest --push .
+```
+
+**Network mode:** the container uses `network_mode: host` so it can reach the inverter on the local network via Modbus TCP without any port-mapping configuration. This is the same network namespace as the Pi host — the container sees the inverter at the same hostname or IP you configured in `[connection] host`.
+
+**Logs:** cron output is forwarded to the Docker log driver and visible via `docker logs batctl` (or `docker logs -f batctl` to follow).
+
+**Config changes:** edit `batctl.conf` on the host and restart the container:
+
+```sh
+docker compose restart batctl
+```
+
 ### cron
 
 See `scripts/cron/` for a ready-to-use wrapper script and installation instructions.

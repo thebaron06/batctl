@@ -1,0 +1,29 @@
+# batctl Docker Compose
+#
+# Supported on all Raspberry Pi models and x86:
+#   Pi Zero W (original), Pi 2, Pi 3, Pi 4, Pi 5, Pi Zero 2 W, x86_64
+#
+# Usage:
+#   cp batctl.conf.example batctl.conf
+#   # edit batctl.conf ...
+#   docker compose up -d --build
+#
+# Cross-compile from an x86 machine (requires docker buildx and QEMU binfmt):
+#   docker buildx build --platform linux/arm/v6 -t batctl --load .
+#   (copy the image to the Pi, then: docker compose up -d)
+
+services:
+  batctl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: batctl:latest
+    container_name: batctl
+    restart: unless-stopped
+    # host networking gives the container direct access to the inverter
+    # on the local network via Modbus TCP without any port-mapping setup
+    network_mode: host
+    volumes:
+      # Mount your batctl.conf (read-only).
+      # Copy batctl.conf.example -> batctl.conf and fill in your settings first.
+      - ./batctl.conf:/config/batctl.conf:ro

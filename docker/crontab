@@ -1,0 +1,9 @@
+# /etc/cron.d/batctl - system cron drop-in (Debian/Ubuntu format)
+# Fields: minute hour dom month dow user command
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+# Run batctl every 5 minutes, aligned to the clock.
+# Output is forwarded to the container log (visible via: docker logs batctl).
+*/5 * * * * root /app/.venv/bin/python /app/batctl.py run --config /config/batctl.conf >> /proc/1/fd/1 2>&1
