@@ -1362,13 +1362,29 @@ def _apply_charge_control(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw,
 
 def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, now, today, state=None):
     """Apply controlled discharge for night grid export."""
-    # Weather check
+    # Determine which solar day will replenish the battery and compute next sunrise.
+    # After midnight  but before today's sunrise we are still in lat night's export
+    # cycle; the battery is replenished by today's solar, not tomorrow's.
+    tz = ZoneInfo(cfg.timezone)
+    today_sun = get_sun_times(cfg.latitude, cfg.longitude, cfg.timezone, today)
+    today_sunrise = today_sun["sunrise"]
+    if now < today_sunrise:
+        next_sunrise = today_sunrise
+        solar_day = today
+    else:
+        _tomorrow = today + datetime.timedelta(days=1)
+        next_sun = get_sun_times(cfg.latitude, cfg.longitude, cfg.timezone, _tomorrow)
+        next_sunrise = next_sun["sunrise"]
+        solar_day = _tomorrow
+
+    # Weather check: use the forecast for solar_day (the day that replenishes the battery).
+    # get_or_refresh_forecast adds one day internally, so pass solar_day - 1
     if cfg.feat_weather_aware:
-        expected_kwh = get_or_refresh_forecast(cfg, today)
+        expected_kwh = get_or_refresh_forecast(cfg, solar_day - datetime.timedelta(days=1))
         if expected_kwh is not None and expected_kwh < cfg.skip_export_below_kwh:
             log.info(
-                "Tomorrow's forecast %.1f kWh < threshold %.1f kWh - skipping grid export",
-                expected_kwh, cfg.skip_export_below_kwh,
+                "Forecast for %s: %.1f kWh < threshold %.1f kWh - skipping grid export"
+                solar_day, expected_kwh, cfg.skip_export_below_kwh,
             )
             _conditional_write(state, cfg, storage, max_raw, max_raw, 0, args.dry_run, now)
             return
@@ -1384,19 +1400,6 @@ def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, n
         _conditional_write(state, cfg, storage, max_raw, max_raw, 0, args.dry_run, now)
         return
 
-    # Compute hours until next sunrise.
-    # After midnight but before today's sunrise we're still in last night's
-    # export cycle; use today's sunrise, not tomorrow's.
-    tz = ZoneInfo(cfg.timezone)
-    today_sun = get_sun_times(cfg.latitude, cfg.longitude, cfg.timezone, today)
-    today_sunrise = today_sun["sunrise"]
-    if now < today_sunrise:
-        next_sunrise = today_sunrise
-    else:
-        tomorrow = today + datetime.timedelta(days=1)
-        next_sun = get_sun_times(cfg.latitude, cfg.longitude, cfg.timezone, tomorrow)
-        next_sunrise = next_sun["sunrise"]
-
     if now >= next_sunrise:
         log.info("Sunrise imminent - stopping discharge")
         _conditional_write(state, cfg, storage, max_raw, max_raw, 0, args.dry_run, now)
@@ -1410,8 +1413,7 @@ def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, n
         if cfg.pv_peak_kwp > 0:
             cache = _read_weather_cache(cfg.cache_path)
             if cache:
-                tomorrow_date = (today if now < today_sunrise else today + datetime.timedelta(days=1))
-                tomorrow_hourly = _get_hourly_radiation(cache, tomorrow_date)
+                tomorrow_hourly = _get_hourly_radiation(cache, solar_day)
                 if tomorrow_hourly:
                     extend_h = compute_auto_extend_hours(
                         tomorrow_hourly, cfg.avg_base_load_w,
