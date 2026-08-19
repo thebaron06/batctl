@@ -1383,7 +1383,7 @@ def _apply_night_export(args, cfg, storage, soc, wchamax, sf, sf_abs, max_raw, n
         expected_kwh = get_or_refresh_forecast(cfg, solar_day - datetime.timedelta(days=1))
         if expected_kwh is not None and expected_kwh < cfg.skip_export_below_kwh:
             log.info(
-                "Forecast for %s: %.1f kWh < threshold %.1f kWh - skipping grid export"
+                "Forecast for %s: %.1f kWh < threshold %.1f kWh - skipping grid export",
                 solar_day, expected_kwh, cfg.skip_export_below_kwh,
             )
             _conditional_write(state, cfg, storage, max_raw, max_raw, 0, args.dry_run, now)
