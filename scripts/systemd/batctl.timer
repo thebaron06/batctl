@@ -9,4 +9,4 @@ Persistent=true
 Unit=batctl.service
 
 [Install]
-WantedBy=timer.target
+WantedBy=timers.target
